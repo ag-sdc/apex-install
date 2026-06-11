@@ -3,8 +3,9 @@ project('apex-install', version: '1.0.0')
 go = find_program('go')
 
 exe = custom_target('apex-install',
+  input: 'src/main.go',
   output: 'apex-install',
-  command: [go, 'build', '-o', '@OUTPUT@', meson.project_source_root() + '/src/main.go'],
+  command: [go, 'build', '-o', '@OUTPUT@', '@INPUT@'],
   build_by_default: true,
   install: true,
   install_dir: get_option('bindir')

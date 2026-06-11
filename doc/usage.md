@@ -7,16 +7,34 @@
 The primary entry point is passing the shared library name to the command:
 
 ```bash
-sudo apex-install <library_name.so>
+sudo apex-install <library_name.so> [additional_targets...]
 ```
 
 > [!NOTE]
-> `apex-install` requires `root` privileges (`sudo`) because it uses `losetup` to bind the payload image to a loop device and `mount` to attach the ext4/erofs filesystem.
+> `apex-install` requires `root` privileges (`sudo`) because it uses `losetup` to bind the payload image to a loop device and `mount` to attach the ext4/erofs filesystem. (Unless using `--search` which does not mount anything).
 
-### Example
+### Options
+
+* `--arch <architecture>`: Force the tool to query a specific architecture. **Required** if you use `--max-microarch`.
+* `--max-microarch <level>`: Specify the highest microarchitecture level to download (e.g. `v3` for `x86_64` or `v8_2` for `aarch64`).
+  * If omitted, the tool prioritizes the *lowest* compatible microarchitecture for maximum system compatibility.
+  * If provided, the tool restricts candidates to this level or lower, and prioritizes the *highest* compatible microarchitecture (e.g., trying `v3`, then `v2`, then `v1`).
+* `--search`: Perform a dry-run search only. Returns the resolved `<apex name>.<apex or capex> <version> <architecture>-v<microarchitecture>` to stdout without downloading, extracting, or mounting.
+
+### Examples
 To install the APEX package that provides `libvulkan.so`:
 ```bash
 sudo apex-install libvulkan.so
+```
+
+To install multiple dependencies prioritizing `v3` microarchitecture:
+```bash
+sudo apex-install --arch=x86_64 --max-microarch=v3 libvulkan.so libcamera2ndk.so
+```
+
+To query the exact file that would be downloaded without actually installing it:
+```bash
+apex-install --search --arch=aarch64 --max-microarch=v8_2 libamdgpu.so
 ```
 
 ## How It Works

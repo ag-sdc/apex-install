@@ -1,20 +1,13 @@
 # Default APEX Repository Configuration
 # Location: /etc/apex/repo.conf
+# Repositories are parsed in the order they appear. The first repository has the highest priority.
 
-# REPO_URL: The base URL of the Forgejo APEX package registry.
-# Replace with your actual Forgejo domain and owner name.
-REPO_URL=https://forgejo.example.com/api/packages/myowner/apex
-
-# REPO_NAME: The name of the specific APEX repository to sync from.
-REPO_NAME=myrepo
-
-# ARCH: Optional. Force a specific architecture (e.g., x86_64, aarch64).
-# If left blank, it will fall back to 'any' or default resolution logic.
-ARCH=
-
-# AUTH_TOKEN: Optional. Provide a Bearer token if the Forgejo repository is private.
+[myrepo]
+URL=https://forgejo.example.com/api/packages/myowner/apex
+# ARCH=x86_64
 # AUTH_TOKEN=your_personal_access_token_here
-
-# AUTH_BASIC: Optional. Provide Base64 encoded 'username:password' for Basic Auth.
-# Note: You should only use AUTH_TOKEN OR AUTH_BASIC, not both.
 # AUTH_BASIC=
+
+[otherrepo]
+URL=https://forgejo.example.com/api/packages/otherowner/apex
+# ARCH=aarch64

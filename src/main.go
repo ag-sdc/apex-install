@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"compress/gzip"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,27 +18,50 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-type Config struct {
-	RepoURL   string
-	RepoName  string
+var satisfiedLibs = map[string]bool{
+	"libaaudio.so": true, "libamidi.so": true, "libandroid.so": true, "libbinder_ndk.so": true,
+	"libcamera2ndk.so": true, "libc++.so": true, "libc.so": true, "libdl.so": true, "libEGL.so": true,
+	"libGLESv1_CM.so": true, "libGLESv2.so": true, "libGLESv3.so": true, "libicu.so": true,
+	"libjnigraphics.so": true, "liblog.so": true, "libmediandk.so": true, "libm.so": true,
+	"libnativehelper.so": true, "libnativewindow.so": true, "libneuralnetworks.so": true,
+	"libOpenMAXAL.so": true, "libOpenSLES.so": true, "libstdc++.so": true, "libsync.so": true,
+	"libvulkan.so": true, "libz.so": true, "libc++_shared.so": true, "libcutils.so": true,
+	"libhardware.so": true,
+}
+
+type RepoConfig struct {
+	Name      string
+	URL       string
 	AuthToken string
 	AuthBasic string
 	Arch      string
 }
 
-func readConfig(path string) (*Config, error) {
+func readConfig(path string) ([]*RepoConfig, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	cfg := &Config{}
+	var repos []*RepoConfig
+	var currentRepo *RepoConfig
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if len(line) == 0 || strings.HasPrefix(line, "#") {
 			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			currentRepo = &RepoConfig{
+				Name: line[1 : len(line)-1],
+			}
+			repos = append(repos, currentRepo)
+			continue
+		}
+		if currentRepo == nil {
+			continue // ignore keys outside of sections
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
@@ -46,22 +70,20 @@ func readConfig(path string) (*Config, error) {
 		k := strings.TrimSpace(parts[0])
 		v := strings.TrimSpace(parts[1])
 		switch k {
-		case "REPO_URL":
-			cfg.RepoURL = v
-		case "REPO_NAME":
-			cfg.RepoName = v
+		case "URL":
+			currentRepo.URL = strings.TrimRight(v, "/")
 		case "AUTH_TOKEN":
-			cfg.AuthToken = v
+			currentRepo.AuthToken = v
 		case "AUTH_BASIC":
-			cfg.AuthBasic = v
+			currentRepo.AuthBasic = v
 		case "ARCH":
-			cfg.Arch = v
+			currentRepo.Arch = v
 		}
 	}
-	return cfg, scanner.Err()
+	return repos, scanner.Err()
 }
 
-func doReq(cfg *Config, urlStr string) (*http.Response, error) {
+func doReq(cfg *RepoConfig, urlStr string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return nil, err
@@ -76,59 +98,66 @@ func doReq(cfg *Config, urlStr string) (*http.Response, error) {
 	return client.Do(req)
 }
 
-func getProviders(cfg *Config, libName string) ([]string, error) {
-	urlStr := fmt.Sprintf("%s/%s.providers.tar.gz", strings.TrimRight(cfg.RepoURL, "/"), cfg.RepoName)
-	resp, err := doReq(cfg, urlStr)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+type PackageCandidate struct {
+	RepoPriority int
+	Repo         *RepoConfig
+	Name         string
+	Version      string
+	Org          string
+	Arch         string
+	MicroArch    string
+	Depends      []string
+	Provides     []string
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to download providers: %s", resp.Status)
+type RegistryCache struct {
+	Providers map[string][]string // libName -> list of package names
+	Packages  []*PackageCandidate // all packages in this repo
+}
+
+func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
+	cache := &RegistryCache{
+		Providers: make(map[string][]string),
 	}
 
-	gzr, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if header.Name == "providers" || header.Name == cfg.RepoName+".providers" {
-			scanner := bufio.NewScanner(tr)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, libName+":") {
-					pkgs := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, libName+":")))
-					return pkgs, nil
+	// 1. Fetch Providers
+	provURL := fmt.Sprintf("%s/%s.providers.tar.gz", repo.URL, repo.Name)
+	resp, err := doReq(repo, provURL)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		gzr, err := gzip.NewReader(resp.Body)
+		if err == nil {
+			tr := tar.NewReader(gzr)
+			for {
+				header, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					break
+				}
+				if header.Name == "providers" || header.Name == repo.Name+".providers" {
+					scanner := bufio.NewScanner(tr)
+					for scanner.Scan() {
+						line := strings.TrimSpace(scanner.Text())
+						parts := strings.SplitN(line, ":", 2)
+						if len(parts) == 2 {
+							lib := strings.TrimSpace(parts[0])
+							pkgs := strings.Fields(strings.TrimSpace(parts[1]))
+							cache.Providers[lib] = append(cache.Providers[lib], pkgs...)
+						}
+					}
 				}
 			}
+			gzr.Close()
 		}
 	}
-	return nil, fmt.Errorf("library %s not found in providers", libName)
-}
+	if resp != nil {
+		resp.Body.Close()
+	}
 
-type PackageCandidate struct {
-	Name      string
-	Version   string
-	Org       string
-	Arch      string
-	MicroArch string
-	Priority  int // lower is better
-}
-
-func getCandidates(cfg *Config, pkgNames []string) ([]PackageCandidate, error) {
-	urlStr := fmt.Sprintf("%s/%s.db.tar.gz", strings.TrimRight(cfg.RepoURL, "/"), cfg.RepoName)
-	resp, err := doReq(cfg, urlStr)
+	// 2. Fetch DB
+	dbURL := fmt.Sprintf("%s/%s.db.tar.gz", repo.URL, repo.Name)
+	resp, err = doReq(repo, dbURL)
 	if err != nil {
 		return nil, err
 	}
@@ -144,12 +173,6 @@ func getCandidates(cfg *Config, pkgNames []string) ([]PackageCandidate, error) {
 	}
 	defer gzr.Close()
 
-	pkgOrder := make(map[string]int)
-	for i, p := range pkgNames {
-		pkgOrder[p] = i
-	}
-
-	var candidates []PackageCandidate
 	tr := tar.NewReader(gzr)
 	for {
 		header, err := tr.Next()
@@ -160,52 +183,66 @@ func getCandidates(cfg *Config, pkgNames []string) ([]PackageCandidate, error) {
 			return nil, err
 		}
 		if strings.HasSuffix(header.Name, "/desc") {
-			// Read desc
 			content, err := io.ReadAll(tr)
 			if err != nil {
 				continue
 			}
 			lines := strings.Split(string(content), "\n")
-			var name, version, arch, microarch, org string
-			for i := 0; i < len(lines); i++ {
-				line := strings.TrimSpace(lines[i])
-				if line == "%NAME%" && i+1 < len(lines) {
-					name = strings.TrimSpace(lines[i+1])
-				} else if line == "%VERSION%" && i+1 < len(lines) {
-					version = strings.TrimSpace(lines[i+1])
-				} else if line == "%ARCH%" && i+1 < len(lines) {
-					arch = strings.TrimSpace(lines[i+1])
-				} else if line == "%MICROARCH%" && i+1 < len(lines) {
-					microarch = strings.TrimSpace(lines[i+1])
-				} else if line == "%ORG%" && i+1 < len(lines) {
-					org = strings.TrimSpace(lines[i+1])
+
+			cand := &PackageCandidate{
+				RepoPriority: repoIndex,
+				Repo:         repo,
+			}
+
+			var currentSection string
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "%") && strings.HasSuffix(line, "%") {
+					currentSection = line
+					continue
+				}
+				if line == "" {
+					currentSection = ""
+					continue
+				}
+
+				switch currentSection {
+				case "%NAME%":
+					cand.Name = line
+				case "%VERSION%":
+					cand.Version = line
+				case "%ARCH%":
+					cand.Arch = line
+				case "%MICROARCH%":
+					cand.MicroArch = line
+				case "%ORG%":
+					cand.Org = line
+				case "%DEPENDS%":
+					cand.Depends = append(cand.Depends, line)
+				case "%PROVIDES%":
+					cand.Provides = append(cand.Provides, line)
 				}
 			}
 
-			if prio, ok := pkgOrder[name]; ok {
-				if cfg.Arch == "" || cfg.Arch == arch || arch == "any" {
-					candidates = append(candidates, PackageCandidate{
-						Name:      name,
-						Version:   version,
-						Org:       org,
-						Arch:      arch,
-						MicroArch: microarch,
-						Priority:  prio,
-					})
-				}
+			if repo.Arch == "" || repo.Arch == cand.Arch || cand.Arch == "any" {
+				cache.Packages = append(cache.Packages, cand)
 			}
 		}
 	}
-	return candidates, nil
+
+	return cache, nil
 }
 
-func sortCandidates(candidates []PackageCandidate) {
+func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Priority != candidates[j].Priority {
-			return candidates[i].Priority < candidates[j].Priority
+		if candidates[i].RepoPriority != candidates[j].RepoPriority {
+			return candidates[i].RepoPriority < candidates[j].RepoPriority
 		}
 		if candidates[i].MicroArch != candidates[j].MicroArch {
-			return candidates[i].MicroArch < candidates[j].MicroArch
+			if maxMicroarch != "" {
+				return candidates[i].MicroArch > candidates[j].MicroArch // highest first
+			}
+			return candidates[i].MicroArch < candidates[j].MicroArch // lowest first
 		}
 		v1 := candidates[i].Version
 		v2 := candidates[j].Version
@@ -219,11 +256,8 @@ func sortCandidates(candidates []PackageCandidate) {
 	})
 }
 
-func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
-	// e.g. <arch>-<microarch>/reverse/domain/org/name/version.apex
-	// microarch formatting: replace _ with . (e.g. v8_0 -> v8.0)
+func resolveExtension(cand *PackageCandidate) string {
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
-	
 	archSegment := cand.Arch
 	if dirMicroArch != "" {
 		archSegment = fmt.Sprintf("%s-%s", cand.Arch, dirMicroArch)
@@ -231,20 +265,51 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 
 	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
 	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
-	urlStr := fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(cfg.RepoURL, "/"), archSegment, orgPath, pkgFilename)
+	urlStr := fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, orgPath, pkgFilename)
+
+	req, err := http.NewRequest("HEAD", urlStr, nil)
+	if err != nil {
+		return "apex"
+	}
+	if cand.Repo.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cand.Repo.AuthToken)
+	} else if cand.Repo.AuthBasic != "" {
+		req.Header.Set("Authorization", "Basic "+cand.Repo.AuthBasic)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return "capex"
+		}
+	}
+	return "apex"
+}
+
+func downloadAndExtract(cand *PackageCandidate) error {
+	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
+	archSegment := cand.Arch
+	if dirMicroArch != "" {
+		archSegment = fmt.Sprintf("%s-%s", cand.Arch, dirMicroArch)
+	}
+
+	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
+	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
+	urlStr := fmt.Sprintf("%s/%s/%s/%s", cand.Repo.URL, archSegment, orgPath, pkgFilename)
 
 	fmt.Printf("Downloading %s...\n", urlStr)
-	resp, err := doReq(cfg, urlStr)
+	resp, err := doReq(cand.Repo, urlStr)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		// fallback to .apex
 		pkgFilename = fmt.Sprintf("%s-%s.apex", cand.Name, cand.Version)
-		urlStr = fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(cfg.RepoURL, "/"), archSegment, orgPath, pkgFilename)
-		resp2, err := doReq(cfg, urlStr)
+		urlStr = fmt.Sprintf("%s/%s/%s/%s", cand.Repo.URL, archSegment, orgPath, pkgFilename)
+		resp2, err := doReq(cand.Repo, urlStr)
 		if err != nil {
 			return err
 		}
@@ -257,9 +322,7 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 	}
 
 	targetDir := fmt.Sprintf("/opt/apex/%s.%s.apex", cand.Org, cand.Name)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return err
-	}
+	os.MkdirAll(targetDir, 0755)
 
 	tmpFile := filepath.Join(targetDir, "pkg.zip")
 	out, err := os.Create(tmpFile)
@@ -272,7 +335,6 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 		return err
 	}
 
-	fmt.Printf("Extracting to %s...\n", targetDir)
 	zr, err := zip.OpenReader(tmpFile)
 	if err != nil {
 		return err
@@ -289,12 +351,10 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 			continue
 		}
 		rc, err := f.Open()
-		if err != nil {
-			outFile.Close()
-			continue
+		if err == nil {
+			io.Copy(outFile, rc)
+			rc.Close()
 		}
-		io.Copy(outFile, rc)
-		rc.Close()
 		outFile.Close()
 	}
 	zr.Close()
@@ -302,10 +362,9 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 
 	payloadImg := filepath.Join(targetDir, "apex_payload.img")
 	if _, err := os.Stat(payloadImg); err != nil {
-		return fmt.Errorf("apex_payload.img not found in package")
+		return fmt.Errorf("apex_payload.img not found")
 	}
 
-	fmt.Println("Setting up loop device...")
 	cmd := exec.Command("losetup", "-f", "--show", payloadImg)
 	cmdOut, err := cmd.Output()
 	if err != nil {
@@ -318,68 +377,178 @@ func downloadAndExtract(cfg *Config, cand PackageCandidate) error {
 
 	fmt.Printf("Mounting %s to %s...\n", loopDev, mountPoint)
 	cmd = exec.Command("mount", "-t", "auto", "-o", "ro", loopDev, mountPoint)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mount failed: %v", err)
 	}
 
-	fmt.Println("Successfully installed and mounted!")
 	return nil
 }
 
+func getMicroarchFallbacks(libPrefix, arch, maxMicroarch string) []string {
+	var fallbacks []string
+	if arch == "x86_64" {
+		if len(maxMicroarch) >= 2 && maxMicroarch[0] == 'v' {
+			lvl := int(maxMicroarch[1] - '0')
+			for i := lvl; i >= 2; i-- {
+				fallbacks = append(fallbacks, fmt.Sprintf("%s-%s-v%d.so", libPrefix, arch, i))
+			}
+		}
+	} else if arch == "aarch64" {
+		if len(maxMicroarch) >= 4 && strings.HasPrefix(maxMicroarch, "v8_") {
+			lvl := int(maxMicroarch[3] - '0')
+			for i := lvl; i >= 1; i-- {
+				fallbacks = append(fallbacks, fmt.Sprintf("%s-%s-v8_%d.so", libPrefix, arch, i))
+			}
+		}
+	}
+	return fallbacks
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: apex-install <libname.so>")
+	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
+	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
+	searchOnly := flag.Bool("search", false, "Search only, do not install or resolve dependencies")
+	flag.Parse()
+
+	if *maxMicroarch != "" && *archFlag == "" {
+		fmt.Println("Error: --max-microarch requires the --arch flag")
+		flag.PrintDefaults()
 		os.Exit(1)
 	}
-	libName := os.Args[1]
 
-	cfg, err := readConfig("/etc/apex/repo.conf")
-	if err != nil {
-		// Fallback to local test config
-		cfg, err = readConfig("repo.conf")
-		if err != nil {
-			fmt.Printf("Failed to read config: %v\n", err)
+	targets := flag.Args()
+	if len(targets) == 0 {
+		fmt.Println("Usage: apex-install [options] <target1> [target2] ...")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	repos, err := readConfig("/etc/apex/repo.conf")
+	if err != nil || len(repos) == 0 {
+		repos, err = readConfig("repo.conf")
+		if err != nil || len(repos) == 0 {
+			fmt.Println("Failed to read config or no repositories defined")
 			os.Exit(1)
 		}
 	}
 
-	if cfg.RepoURL == "" || cfg.RepoName == "" {
-		fmt.Println("REPO_URL and REPO_NAME must be set in config")
-		os.Exit(1)
+	if !*searchOnly {
+		fmt.Fprintln(os.Stderr, "Fetching repository metadata...")
+	}
+	caches := make([]*RegistryCache, len(repos))
+	for i, repo := range repos {
+		cache, err := fetchRepoData(i, repo)
+		if err != nil {
+			if !*searchOnly {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to fetch metadata for repo %s: %v\n", repo.Name, err)
+			}
+			continue
+		}
+		caches[i] = cache
 	}
 
-	fmt.Printf("Searching for %s in %s...\n", libName, cfg.RepoName)
-	pkgs, err := getProviders(cfg, libName)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	fmt.Printf("Found providers: %v\n", pkgs)
+	queue := append([]string{}, targets...)
+	resolved := make(map[string]bool)
+	var installList []*PackageCandidate
 
-	candidates, err := getCandidates(cfg, pkgs)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	if len(candidates) == 0 {
-		fmt.Println("No matching packages found for your architecture")
-		os.Exit(1)
+	for len(queue) > 0 {
+		target := queue[0]
+		queue = queue[1:]
+
+		if satisfiedLibs[target] {
+			continue // skip satisfied system libs
+		}
+		if resolved[target] {
+			continue
+		}
+
+		var candidates []*PackageCandidate
+
+		// Search across all caches
+		for _, cache := range caches {
+			if cache == nil {
+				continue
+			}
+
+			// If target is a library, resolve it to package names
+			searchPkgs := []string{target}
+			
+			// Auto-append fallback variants if it's a library and architecture/microarch is defined
+			libPrefix := target
+			if strings.HasSuffix(target, ".so") {
+				libPrefix = strings.TrimSuffix(target, ".so")
+			}
+			
+			if strings.HasSuffix(target, ".so") && cache.Packages != nil && len(cache.Packages) > 0 {
+				if *maxMicroarch != "" && *archFlag != "" {
+					fallbacks := getMicroarchFallbacks(libPrefix, *archFlag, *maxMicroarch)
+					searchPkgs = append(searchPkgs, fallbacks...)
+				}
+			}
+
+			for _, sp := range searchPkgs {
+				if pkgs, ok := cache.Providers[sp]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
+			}
+
+			// Find packages matching the search names
+			for _, pkgName := range searchPkgs {
+				for _, cand := range cache.Packages {
+					if cand.Name == pkgName {
+						if *maxMicroarch != "" && cand.MicroArch > *maxMicroarch {
+							continue // skip if higher than requested maximum
+						}
+						candidates = append(candidates, cand)
+					}
+				}
+			}
+		}
+
+		if len(candidates) == 0 {
+			fmt.Printf("Error: Unresolvable dependency: %s\n", target)
+			os.Exit(1)
+		}
+
+		sortCandidates(candidates, *maxMicroarch)
+		selected := candidates[0]
+
+		if *searchOnly {
+			ext := resolveExtension(selected)
+			microarchStr := selected.MicroArch
+			if !strings.HasPrefix(microarchStr, "v") {
+				microarchStr = "v" + microarchStr
+			}
+			fmt.Printf("%s.%s.%s %s %s-%s\n", selected.Org, selected.Name, ext, selected.Version, selected.Arch, microarchStr)
+			continue // do not add to installList and don't resolve dependencies
+		}
+
+		fmt.Printf("Resolved %s -> %s.%s v%s (Repo: %s)\n", target, selected.Org, selected.Name, selected.Version, selected.Repo.Name)
+
+		installList = append(installList, selected)
+		resolved[target] = true
+		resolved[selected.Name] = true
+
+		// Add dependencies to queue
+		for _, dep := range selected.Depends {
+			if !resolved[dep] {
+				queue = append(queue, dep)
+			}
+		}
 	}
 
-	sortCandidates(candidates)
-
-	fmt.Println("Candidate options:")
-	for i, c := range candidates {
-		fmt.Printf(" [%d] %s.%s v%s (Arch: %s, Micro: %s) Priority: %d\n", i+1, c.Org, c.Name, c.Version, c.Arch, c.MicroArch, c.Priority)
+	if *searchOnly {
+		return // we just exit
 	}
 
-	top := candidates[0]
-	fmt.Printf("Auto-selecting best match: %s.%s v%s\n", top.Org, top.Name, top.Version)
-
-	if err := downloadAndExtract(cfg, top); err != nil {
-		fmt.Printf("Installation failed: %v\n", err)
-		os.Exit(1)
+	fmt.Printf("\nReady to install %d packages.\n", len(installList))
+	for _, pkg := range installList {
+		fmt.Printf("Installing %s.%s v%s...\n", pkg.Org, pkg.Name, pkg.Version)
+		if err := downloadAndExtract(pkg); err != nil {
+			fmt.Printf("Installation failed for %s: %v\n", pkg.Name, err)
+			os.Exit(1)
+		}
 	}
+
+	fmt.Println("All packages installed and mounted successfully!")
 }

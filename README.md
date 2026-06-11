@@ -13,6 +13,12 @@ Configuration is managed via `/etc/apex/repo.conf`. See `repo.conf.sample` for d
 
 ## Usage
 ```bash
-# Must be run as root to configure loop devices and mount points
+# Basic installation (Must be run as root to configure loop devices)
 sudo apex-install libvulkan.so
+
+# Install multiple libraries, targeting a specific microarchitecture
+sudo apex-install --arch=x86_64 --max-microarch=v3 libvulkan.so libcamera2ndk.so
+
+# Search-only (Dry run to print the exact package that satisfies the dependency)
+apex-install --search --arch=aarch64 --max-microarch=v8_1 libvulkan.so
 ```
