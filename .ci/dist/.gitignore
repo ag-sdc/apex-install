@@ -1,0 +1,24 @@
+# Build artifacts and packages
+*.pkg.tar.*
+*.apk
+*.apex
+*.zip
+*.tar.*
+*.tar
+*.apk
+
+# Build directories
+src/
+pkg/
+apex-install/
+
+# Generated keys
+*.pub
+apex_pubkey
+*.pem
+*.pk8
+*.idsig
+
+# Build temp files
+*.xml
+*.json

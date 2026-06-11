@@ -3,11 +3,11 @@ pkgver=0.0.1
 pkgrel=1
 pkgdesc="Automated APEX package installer via Forgejo registry"
 arch=('x86_64' 'aarch64')
-url="https://github.com/shadichy/apex-install"
+url="https://github.com/ag-sdc/apex-install"
 license=('MIT')
 depends=('glibc')
 makedepends=('go' 'meson' 'ninja')
-source=("git+https://github.com/shadichy/apex-install.git")
+source=("git+$url")
 md5sums=('SKIP')
 
 build() {
