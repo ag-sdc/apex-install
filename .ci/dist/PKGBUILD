@@ -7,7 +7,7 @@ url="https://github.com/ag-sdc/apex-install"
 license=('MIT')
 depends=('glibc')
 makedepends=('go' 'meson' 'ninja')
-source=("git+$url")
+source=("git+file://${startdir}/../../")
 md5sums=('SKIP')
 
 build() {
