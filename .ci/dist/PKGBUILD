@@ -1,0 +1,27 @@
+pkgname=apex-install
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Automated APEX package installer via Forgejo registry"
+arch=('x86_64' 'aarch64')
+url="https://github.com/shadichy/apex-install"
+license=('MIT')
+depends=('glibc')
+makedepends=('go' 'meson' 'ninja')
+source=("git+https://github.com/shadichy/apex-install.git")
+md5sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname"
+  export CGO_CPPFLAGS="${CPPFLAGS}"
+  export CGO_CFLAGS="${CFLAGS}"
+  export CGO_CXXFLAGS="${CXXFLAGS}"
+  export CGO_LDFLAGS="${LDFLAGS}"
+
+  meson setup build --prefix=/usr
+  meson compile -C build
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  meson install -C build --destdir "$pkgdir"
+}
