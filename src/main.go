@@ -377,11 +377,59 @@ func downloadAndExtract(cand *PackageCandidate) error {
 
 	fmt.Printf("Mounting %s to %s...\n", loopDev, mountPoint)
 	cmd = exec.Command("mount", "-t", "auto", "-o", "ro", loopDev, mountPoint)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mount failed: %v", err)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to mount %s to %s: %v\nOutput: %s", loopDev, mountPoint, err, string(output))
 	}
 
+	createSymlinks(fmt.Sprintf("%s.%s", cand.Org, cand.Name))
+
 	return nil
+}
+
+func linkContents(srcDir, destDir string) {
+	if stat, err := os.Stat(srcDir); err != nil || !stat.IsDir() {
+		return
+	}
+	os.MkdirAll(destDir, 0755)
+	entries, _ := os.ReadDir(srcDir)
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		destPath := filepath.Join(destDir, entry.Name())
+
+		if entry.IsDir() {
+			linkContents(srcPath, destPath)
+		} else {
+			os.Remove(destPath)
+			os.Symlink(srcPath, destPath)
+		}
+	}
+}
+
+func createSymlinks(pkgName string) {
+	mountPoint := filepath.Join("/apex", pkgName)
+
+	// Process include
+	includesSrc := filepath.Join(mountPoint, "includes")
+	if _, err := os.Stat(includesSrc); os.IsNotExist(err) {
+		includesSrc = filepath.Join(mountPoint, "include") // Fallback
+	}
+	linkContents(includesSrc, "/apex/include")
+
+	// Process lib
+	linkContents(filepath.Join(mountPoint, "lib"), "/apex/lib")
+	
+	// If lib/pkg-config exists, also merge it into the standard /apex/lib/pkgconfig
+	pkgConfigDash := filepath.Join(mountPoint, "lib", "pkg-config")
+	if stat, err := os.Stat(pkgConfigDash); err == nil && stat.IsDir() {
+		linkContents(pkgConfigDash, "/apex/lib/pkgconfig")
+	}
+
+	// Process bin
+	linkContents(filepath.Join(mountPoint, "bin"), "/apex/bin")
+
+	// Process share
+	linkContents(filepath.Join(mountPoint, "share"), "/apex/share")
 }
 
 func getMicroarchFallbacks(libPrefix, arch, maxMicroarch string) []string {
