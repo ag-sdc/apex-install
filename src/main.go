@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -106,6 +107,7 @@ type PackageCandidate struct {
 	Org          string
 	Arch         string
 	MicroArch    string
+	ApiLevel     string
 	Depends      []string
 	Provides     []string
 }
@@ -215,6 +217,8 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 					cand.Arch = line
 				case "%MICROARCH%":
 					cand.MicroArch = line
+				case "%APILEVEL%":
+					cand.ApiLevel = line
 				case "%ORG%":
 					cand.Org = line
 				case "%DEPENDS%":
@@ -244,6 +248,15 @@ func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
 			}
 			return candidates[i].MicroArch < candidates[j].MicroArch // lowest first
 		}
+		
+		apiI, _ := strconv.Atoi(candidates[i].ApiLevel)
+		apiJ, _ := strconv.Atoi(candidates[j].ApiLevel)
+		if apiI == 0 { apiI = 29 }
+		if apiJ == 0 { apiJ = 29 }
+		if apiI != apiJ {
+			return apiI > apiJ
+		}
+
 		v1 := candidates[i].Version
 		v2 := candidates[j].Version
 		if !strings.HasPrefix(v1, "v") {
@@ -260,12 +273,17 @@ func resolveExtension(cand *PackageCandidate) string {
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
 	archSegment := cand.Arch
 	if dirMicroArch != "" {
-		archSegment = fmt.Sprintf("%s-%s", cand.Arch, dirMicroArch)
+		archSegment = fmt.Sprintf("%s/v%s", cand.Arch, dirMicroArch)
+	}
+
+	apiLevelSegment := cand.ApiLevel
+	if apiLevelSegment == "" || apiLevelSegment == "0" {
+		apiLevelSegment = "29"
 	}
 
 	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
 	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
-	urlStr := fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, orgPath, pkgFilename)
+	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
 	req, err := http.NewRequest("HEAD", urlStr, nil)
 	if err != nil {
@@ -292,12 +310,17 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
 	archSegment := cand.Arch
 	if dirMicroArch != "" {
-		archSegment = fmt.Sprintf("%s-%s", cand.Arch, dirMicroArch)
+		archSegment = fmt.Sprintf("%s/v%s", cand.Arch, dirMicroArch)
+	}
+
+	apiLevelSegment := cand.ApiLevel
+	if apiLevelSegment == "" || apiLevelSegment == "0" {
+		apiLevelSegment = "29"
 	}
 
 	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
 	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
-	urlStr := fmt.Sprintf("%s/%s/%s/%s", cand.Repo.URL, archSegment, orgPath, pkgFilename)
+	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
 	fmt.Printf("Downloading %s...\n", urlStr)
 	resp, err := doReq(cand.Repo, urlStr)
@@ -455,6 +478,7 @@ func getMicroarchFallbacks(libPrefix, arch, maxMicroarch string) []string {
 func main() {
 	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
 	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
+	apiLevel := flag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
 	searchOnly := flag.Bool("search", false, "Search only, do not install or resolve dependencies")
 	flag.Parse()
 
@@ -546,6 +570,13 @@ func main() {
 					if cand.Name == pkgName {
 						if *maxMicroarch != "" && cand.MicroArch > *maxMicroarch {
 							continue // skip if higher than requested maximum
+						}
+						if *apiLevel > 0 {
+							cApi, _ := strconv.Atoi(cand.ApiLevel)
+							if cApi == 0 { cApi = 29 }
+							if cApi > *apiLevel {
+								continue // skip if higher than target API level
+							}
 						}
 						candidates = append(candidates, cand)
 					}
