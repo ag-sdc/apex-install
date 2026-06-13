@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"compress/gzip"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -92,7 +93,8 @@ func doReq(cfg *RepoConfig, urlStr string) (*http.Response, error) {
 	if cfg.AuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
 	} else if cfg.AuthBasic != "" {
-		req.Header.Set("Authorization", "Basic "+cfg.AuthBasic)
+		encoded := base64.StdEncoding.EncodeToString([]byte(cfg.AuthBasic))
+		req.Header.Set("Authorization", "Basic "+encoded)
 	}
 
 	client := &http.Client{}
@@ -122,11 +124,20 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 		Providers: make(map[string][]string),
 	}
 
+	syncDir := "/var/cache/apex/sync"
+	if _, err := os.Stat(syncDir); os.IsNotExist(err) {
+		syncDir = filepath.Join(os.Getenv("HOME"), ".cache/apex/sync")
+	}
+
 	// 1. Fetch Providers
-	provURL := fmt.Sprintf("%s/%s.providers.tar.gz", repo.URL, repo.Name)
-	resp, err := doReq(repo, provURL)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		gzr, err := gzip.NewReader(resp.Body)
+	provFile := filepath.Join(syncDir, repo.Name+".providers.tar.gz")
+	var provReader io.ReadCloser
+	if f, err := os.Open(provFile); err == nil {
+		provReader = f
+	}
+
+	if provReader != nil {
+		gzr, err := gzip.NewReader(provReader)
 		if err == nil {
 			tr := tar.NewReader(gzr)
 			for {
@@ -152,24 +163,20 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 			}
 			gzr.Close()
 		}
-	}
-	if resp != nil {
-		resp.Body.Close()
+		provReader.Close()
 	}
 
 	// 2. Fetch DB
-	dbURL := fmt.Sprintf("%s/%s.db.tar.gz", repo.URL, repo.Name)
-	resp, err = doReq(repo, dbURL)
-	if err != nil {
-		return nil, err
+	dbFile := filepath.Join(syncDir, repo.Name+".db.tar.gz")
+	var dbReader io.ReadCloser
+	if f, err := os.Open(dbFile); err == nil {
+		dbReader = f
+	} else {
+		return nil, fmt.Errorf("repository database missing locally, run with --update first")
 	}
-	defer resp.Body.Close()
+	defer dbReader.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to download db: %s", resp.Status)
-	}
-
-	gzr, err := gzip.NewReader(resp.Body)
+	gzr, err := gzip.NewReader(dbReader)
 	if err != nil {
 		return nil, err
 	}
@@ -475,11 +482,56 @@ func getMicroarchFallbacks(libPrefix, arch, maxMicroarch string) []string {
 	return fallbacks
 }
 
+func tryDownload(repo *RepoConfig, syncDir, suffix string, fallbacks []string) error {
+	for _, s := range fallbacks {
+		urlStr := fmt.Sprintf("%s/%s%s", strings.TrimRight(repo.URL, "/"), repo.Name, s)
+		resp, err := doReq(repo, urlStr)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			dest := filepath.Join(syncDir, repo.Name+suffix)
+			f, err := os.Create(dest)
+			if err != nil {
+				resp.Body.Close()
+				return err
+			}
+			io.Copy(f, resp.Body)
+			f.Close()
+			resp.Body.Close()
+			return nil
+		}
+		resp.Body.Close()
+	}
+	return fmt.Errorf("could not download %s (404 Not Found)", suffix)
+}
+
+func doUpdate(repos []*RepoConfig) {
+	syncDir := "/var/cache/apex/sync"
+	err := os.MkdirAll(syncDir, 0755)
+	if err != nil {
+		syncDir = filepath.Join(os.Getenv("HOME"), ".cache/apex/sync")
+		os.MkdirAll(syncDir, 0755)
+	}
+	for _, repo := range repos {
+		fmt.Printf("Updating repo %s...\n", repo.Name)
+		errProv := tryDownload(repo, syncDir, ".providers.tar.gz", []string{".providers", ".providers.tar.gz"})
+		if errProv != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: %v\n", errProv)
+		}
+		errDb := tryDownload(repo, syncDir, ".db.tar.gz", []string{".db", ".db.tar.gz"})
+		if errDb != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %v\n", errDb)
+		}
+	}
+}
+
 func main() {
 	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
 	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
 	apiLevel := flag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
 	searchOnly := flag.Bool("search", false, "Search only, do not install or resolve dependencies")
+	updateFlag := flag.Bool("update", false, "Update local repository databases")
 	flag.Parse()
 
 	if *maxMicroarch != "" && *archFlag == "" {
@@ -489,7 +541,7 @@ func main() {
 	}
 
 	targets := flag.Args()
-	if len(targets) == 0 {
+	if len(targets) == 0 && !*updateFlag {
 		fmt.Println("Usage: apex-install [options] <target1> [target2] ...")
 		flag.PrintDefaults()
 		os.Exit(1)
@@ -501,6 +553,13 @@ func main() {
 		if err != nil || len(repos) == 0 {
 			fmt.Println("Failed to read config or no repositories defined")
 			os.Exit(1)
+		}
+	}
+
+	if *updateFlag {
+		doUpdate(repos)
+		if len(targets) == 0 {
+			os.Exit(0)
 		}
 	}
 
