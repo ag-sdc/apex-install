@@ -104,7 +104,6 @@ type PackageCandidate struct {
 	Repo         *RepoConfig
 	Name         string
 	Version      string
-	Org          string
 	Arch         string
 	MicroArch    string
 	ApiLevel     string
@@ -176,10 +175,6 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 				// Size is parts[5], but we don't strictly need it right now for the candidate struct
 			}
 
-			// We no longer have Org or Depends/Provides from the DB line directly.
-			// Default Org to Name if missing.
-			cand.Org = cand.Name
-
 			if repo.Arch == "" || repo.Arch == cand.Arch || cand.Arch == "any" {
 				cache.Packages = append(cache.Packages, cand)
 			}
@@ -237,7 +232,7 @@ func resolveExtension(cand *PackageCandidate) string {
 		apiLevelSegment = "29"
 	}
 
-	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
+	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
 	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
 	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
@@ -274,7 +269,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		apiLevelSegment = "29"
 	}
 
-	orgPath := strings.ReplaceAll(cand.Org, ".", "/")
+	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
 	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
 	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
@@ -300,7 +295,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		return fmt.Errorf("failed to download package: %s", resp.Status)
 	}
 
-	targetDir := fmt.Sprintf("/opt/apex/%s.%s.apex", cand.Org, cand.Name)
+	targetDir := fmt.Sprintf("/opt/apex/%s.apex", cand.Name)
 	os.MkdirAll(targetDir, 0755)
 
 	tmpFile := filepath.Join(targetDir, "pkg.zip")
@@ -351,7 +346,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 	loopDev := strings.TrimSpace(string(cmdOut))
 
-	mountPoint := fmt.Sprintf("/apex/%s.%s", cand.Org, cand.Name)
+	mountPoint := fmt.Sprintf("/apex/%s", cand.Name)
 	os.MkdirAll(mountPoint, 0755)
 
 	fmt.Printf("Mounting %s to %s...\n", loopDev, mountPoint)
@@ -361,7 +356,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		return fmt.Errorf("failed to mount %s to %s: %v\nOutput: %s", loopDev, mountPoint, err, string(output))
 	}
 
-	createSymlinks(fmt.Sprintf("%s.%s", cand.Org, cand.Name))
+	createSymlinks(cand.Name)
 
 	return nil
 }
@@ -629,11 +624,11 @@ func main() {
 			if !strings.HasPrefix(microarchStr, "v") {
 				microarchStr = "v" + microarchStr
 			}
-			fmt.Printf("%s.%s.%s %s %s-%s\n", selected.Org, selected.Name, ext, selected.Version, selected.Arch, microarchStr)
+			fmt.Printf("%s.%s %s %s-%s\n", selected.Name, ext, selected.Version, selected.Arch, microarchStr)
 			continue // do not add to installList and don't resolve dependencies
 		}
 
-		fmt.Printf("Resolved %s -> %s.%s v%s (Repo: %s)\n", target, selected.Org, selected.Name, selected.Version, selected.Repo.Name)
+		fmt.Printf("Resolved %s -> %s.%s v%s (Repo: %s)\n", target, selected.Name, resolveExtension(selected), selected.Version, selected.Repo.Name)
 
 		installList = append(installList, selected)
 		resolved[target] = true
@@ -653,7 +648,7 @@ func main() {
 
 	fmt.Printf("\nReady to install %d packages.\n", len(installList))
 	for _, pkg := range installList {
-		fmt.Printf("Installing %s.%s v%s...\n", pkg.Org, pkg.Name, pkg.Version)
+		fmt.Printf("Installing %s v%s...\n", pkg.Name, pkg.Version)
 		if err := downloadAndExtract(pkg); err != nil {
 			fmt.Printf("Installation failed for %s: %v\n", pkg.Name, err)
 			os.Exit(1)
