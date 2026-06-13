@@ -54,7 +54,7 @@ func resolveExtension(cand *PackageCandidate) string {
 	}
 
 	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
-	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
+	pkgFilename := fmt.Sprintf("%s.capex", cand.Version)
 	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
 	req, err := http.NewRequest("HEAD", urlStr, nil)
@@ -69,11 +69,29 @@ func resolveExtension(cand *PackageCandidate) string {
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			return "capex"
+	if err != nil {
+		return "apex"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		pkgFilename = fmt.Sprintf("%s.apex", cand.Version)
+		urlStr = fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
+		req, _ = http.NewRequest("HEAD", urlStr, nil)
+		if cand.Repo.AuthToken != "" {
+			req.Header.Set("Authorization", "Bearer "+cand.Repo.AuthToken)
+		} else if cand.Repo.AuthBasic != "" {
+			req.Header.Set("Authorization", "Basic "+cand.Repo.AuthBasic)
 		}
+		resp2, err := client.Do(req)
+		if err == nil {
+			defer resp2.Body.Close()
+			if resp2.StatusCode == http.StatusOK {
+				return "apex"
+			}
+		}
+	} else if resp.StatusCode == http.StatusOK {
+		return "capex"
 	}
 	return "apex"
 }

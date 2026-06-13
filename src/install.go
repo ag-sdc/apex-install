@@ -24,7 +24,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 
 	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
-	pkgFilename := fmt.Sprintf("%s-%s.capex", cand.Name, cand.Version)
+	pkgFilename := fmt.Sprintf("%s.capex", cand.Version)
 	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
 	fmt.Printf("Downloading %s...\n", urlStr)
@@ -34,9 +34,9 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		pkgFilename = fmt.Sprintf("%s-%s.apex", cand.Name, cand.Version)
-		urlStr = fmt.Sprintf("%s/%s/%s/%s", cand.Repo.URL, archSegment, orgPath, pkgFilename)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusInternalServerError {
+		pkgFilename = fmt.Sprintf("%s.apex", cand.Version)
+		urlStr = fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 		resp2, err := doReq(cand.Repo, urlStr)
 		if err != nil {
 			return err
