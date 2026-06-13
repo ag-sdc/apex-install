@@ -9,6 +9,7 @@ depends=('glibc')
 makedepends=('go' 'meson' 'ninja')
 source=("apex-install::git+file://${startdir}/../../")
 md5sums=('SKIP')
+backup=('etc/apex/repo.conf')
 
 build() {
   cd "$srcdir/$pkgname"

@@ -2,12 +2,9 @@
 # Location: /etc/apex/repo.conf
 # Repositories are parsed in the order they appear. The first repository has the highest priority.
 
-[myrepo]
-URL=https://forgejo.example.com/api/packages/myowner/apex
+# # Example:
+# [myrepo]
+# URL=https://forgejo.example.com/api/packages/myowner/apex
 # ARCH=x86_64
 # AUTH_TOKEN=your_personal_access_token_here
 # AUTH_BASIC=
-
-[otherrepo]
-URL=https://forgejo.example.com/api/packages/otherowner/apex
-# ARCH=aarch64
