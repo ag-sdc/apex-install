@@ -1,10 +1,8 @@
 package main
 
 import (
-	"archive/tar"
 	"archive/zip"
 	"bufio"
-	"compress/gzip"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -126,48 +124,31 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 
 	syncDir := "/var/cache/apex/sync"
 	if _, err := os.Stat(syncDir); os.IsNotExist(err) {
-		syncDir = filepath.Join(os.Getenv("HOME"), ".cache/apex/sync")
+		os.MkdirAll(syncDir, 0755)
 	}
 
 	// 1. Fetch Providers
-	provFile := filepath.Join(syncDir, repo.Name+".providers.tar.gz")
-	var provReader io.ReadCloser
+	provFile := filepath.Join(syncDir, repo.Name+".providers")
 	if f, err := os.Open(provFile); err == nil {
-		provReader = f
-	}
-
-	if provReader != nil {
-		gzr, err := gzip.NewReader(provReader)
-		if err == nil {
-			tr := tar.NewReader(gzr)
-			for {
-				header, err := tr.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if header.Name == "providers" || header.Name == repo.Name+".providers" {
-					scanner := bufio.NewScanner(tr)
-					for scanner.Scan() {
-						line := strings.TrimSpace(scanner.Text())
-						parts := strings.SplitN(line, ":", 2)
-						if len(parts) == 2 {
-							lib := strings.TrimSpace(parts[0])
-							pkgs := strings.Fields(strings.TrimSpace(parts[1]))
-							cache.Providers[lib] = append(cache.Providers[lib], pkgs...)
-						}
-					}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			parts := strings.Fields(line)
+			if len(parts) >= 6 {
+				lib := parts[0]
+				arch := parts[1]
+				// We match the package if the arch matches our repo.Arch or if repo.Arch is empty/any
+				if repo.Arch == "" || repo.Arch == arch || arch == "any" {
+					pkgName := parts[4]
+					cache.Providers[lib] = append(cache.Providers[lib], pkgName)
 				}
 			}
-			gzr.Close()
 		}
-		provReader.Close()
+		f.Close()
 	}
 
 	// 2. Fetch DB
-	dbFile := filepath.Join(syncDir, repo.Name+".db.tar.gz")
+	dbFile := filepath.Join(syncDir, repo.Name+".db")
 	var dbReader io.ReadCloser
 	if f, err := os.Open(dbFile); err == nil {
 		dbReader = f
@@ -176,64 +157,28 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 	}
 	defer dbReader.Close()
 
-	gzr, err := gzip.NewReader(dbReader)
-	if err != nil {
-		return nil, err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
+	scanner := bufio.NewScanner(dbReader)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
 		}
-		if err != nil {
-			return nil, err
-		}
-		if strings.HasSuffix(header.Name, "/desc") {
-			content, err := io.ReadAll(tr)
-			if err != nil {
-				continue
-			}
-			lines := strings.Split(string(content), "\n")
-
+		parts := strings.Fields(line)
+		if len(parts) >= 6 {
 			cand := &PackageCandidate{
 				RepoPriority: repoIndex,
 				Repo:         repo,
+				Name:         parts[0],
+				Arch:         parts[1],
+				MicroArch:    parts[2],
+				ApiLevel:     parts[3],
+				Version:      parts[4],
+				// Size is parts[5], but we don't strictly need it right now for the candidate struct
 			}
 
-			var currentSection string
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "%") && strings.HasSuffix(line, "%") {
-					currentSection = line
-					continue
-				}
-				if line == "" {
-					currentSection = ""
-					continue
-				}
-
-				switch currentSection {
-				case "%NAME%":
-					cand.Name = line
-				case "%VERSION%":
-					cand.Version = line
-				case "%ARCH%":
-					cand.Arch = line
-				case "%MICROARCH%":
-					cand.MicroArch = line
-				case "%APILEVEL%":
-					cand.ApiLevel = line
-				case "%ORG%":
-					cand.Org = line
-				case "%DEPENDS%":
-					cand.Depends = append(cand.Depends, line)
-				case "%PROVIDES%":
-					cand.Provides = append(cand.Provides, line)
-				}
-			}
+			// We no longer have Org or Depends/Provides from the DB line directly.
+			// Default Org to Name if missing.
+			cand.Org = cand.Name
 
 			if repo.Arch == "" || repo.Arch == cand.Arch || cand.Arch == "any" {
 				cache.Packages = append(cache.Packages, cand)
@@ -255,11 +200,15 @@ func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
 			}
 			return candidates[i].MicroArch < candidates[j].MicroArch // lowest first
 		}
-		
+
 		apiI, _ := strconv.Atoi(candidates[i].ApiLevel)
 		apiJ, _ := strconv.Atoi(candidates[j].ApiLevel)
-		if apiI == 0 { apiI = 29 }
-		if apiJ == 0 { apiJ = 29 }
+		if apiI == 0 {
+			apiI = 29
+		}
+		if apiJ == 0 {
+			apiJ = 29
+		}
 		if apiI != apiJ {
 			return apiI > apiJ
 		}
@@ -448,7 +397,7 @@ func createSymlinks(pkgName string) {
 
 	// Process lib
 	linkContents(filepath.Join(mountPoint, "lib"), "/apex/lib")
-	
+
 	// If lib/pkg-config exists, also merge it into the standard /apex/lib/pkgconfig
 	pkgConfigDash := filepath.Join(mountPoint, "lib", "pkg-config")
 	if stat, err := os.Stat(pkgConfigDash); err == nil && stat.IsDir() {
@@ -506,20 +455,41 @@ func tryDownload(repo *RepoConfig, syncDir, suffix string, fallbacks []string) e
 	return fmt.Errorf("could not download %s (404 Not Found)", suffix)
 }
 
+func isWritable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !info.IsDir() {
+		return false
+	}
+	if info.Mode().Perm()&(1<<(uint(7))) == 0 {
+		return false
+	}
+	testFile := filepath.Join(path, ".test")
+	f, err := os.Create(testFile)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(testFile)
+	return true
+}
+
 func doUpdate(repos []*RepoConfig) {
 	syncDir := "/var/cache/apex/sync"
+	// Check if we can write to /var/cache/apex/sync
 	err := os.MkdirAll(syncDir, 0755)
-	if err != nil {
-		syncDir = filepath.Join(os.Getenv("HOME"), ".cache/apex/sync")
+	if err != nil || !isWritable(syncDir) {
 		os.MkdirAll(syncDir, 0755)
 	}
 	for _, repo := range repos {
 		fmt.Printf("Updating repo %s...\n", repo.Name)
-		errProv := tryDownload(repo, syncDir, ".providers.tar.gz", []string{".providers", ".providers.tar.gz"})
+		errProv := tryDownload(repo, syncDir, ".providers", []string{".providers", ".providers.tar.gz"})
 		if errProv != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: %v\n", errProv)
 		}
-		errDb := tryDownload(repo, syncDir, ".db.tar.gz", []string{".db", ".db.tar.gz"})
+		errDb := tryDownload(repo, syncDir, ".db", []string{".db", ".db.tar.gz"})
 		if errDb != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", errDb)
 		}
@@ -603,13 +573,13 @@ func main() {
 
 			// If target is a library, resolve it to package names
 			searchPkgs := []string{target}
-			
+
 			// Auto-append fallback variants if it's a library and architecture/microarch is defined
 			libPrefix := target
 			if strings.HasSuffix(target, ".so") {
 				libPrefix = strings.TrimSuffix(target, ".so")
 			}
-			
+
 			if strings.HasSuffix(target, ".so") && cache.Packages != nil && len(cache.Packages) > 0 {
 				if *maxMicroarch != "" && *archFlag != "" {
 					fallbacks := getMicroarchFallbacks(libPrefix, *archFlag, *maxMicroarch)
@@ -632,7 +602,9 @@ func main() {
 						}
 						if *apiLevel > 0 {
 							cApi, _ := strconv.Atoi(cand.ApiLevel)
-							if cApi == 0 { cApi = 29 }
+							if cApi == 0 {
+								cApi = 29
+							}
 							if cApi > *apiLevel {
 								continue // skip if higher than target API level
 							}
