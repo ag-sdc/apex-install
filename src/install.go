@@ -23,8 +23,9 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		apiLevelSegment = "29"
 	}
 
+	ext := resolveExtension(cand)
 	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
-	pkgFilename := fmt.Sprintf("%s.capex", cand.Version)
+	pkgFilename := fmt.Sprintf("%s.%s", cand.Version, ext)
 	urlStr := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 
 	fmt.Printf("Downloading %s...\n", urlStr)
@@ -34,9 +35,15 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusInternalServerError {
-		pkgFilename = fmt.Sprintf("%s.apex", cand.Version)
+	if resp.StatusCode != http.StatusOK {
+		// Just in case it was a fluke, fallback to the other extension
+		fallbackExt := "apex"
+		if ext == "apex" {
+			fallbackExt = "capex"
+		}
+		pkgFilename = fmt.Sprintf("%s.%s", cand.Version, fallbackExt)
 		urlStr = fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
+		fmt.Printf("Fallback downloading %s...\n", urlStr)
 		resp2, err := doReq(cand.Repo, urlStr)
 		if err != nil {
 			return err
@@ -50,7 +57,9 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 
 	targetDir := fmt.Sprintf("/opt/apex/%s.apex", cand.Name)
-	os.MkdirAll(targetDir, 0755)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v (are you running as root?)", targetDir, err)
+	}
 
 	tmpFile := filepath.Join(targetDir, "pkg.zip")
 	out, err := os.Create(tmpFile)
