@@ -74,7 +74,8 @@ func resolveExtension(cand *PackageCandidate) string {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusNotFound:
 		pkgFilename = fmt.Sprintf("%s.apex", cand.Version)
 		urlStr = fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(cand.Repo.URL, "/"), archSegment, apiLevelSegment, orgPath, pkgFilename)
 		req, _ = http.NewRequest("HEAD", urlStr, nil)
@@ -90,7 +91,7 @@ func resolveExtension(cand *PackageCandidate) string {
 				return "apex"
 			}
 		}
-	} else if resp.StatusCode == http.StatusOK {
+	case http.StatusOK:
 		return "capex"
 	}
 	return "apex"

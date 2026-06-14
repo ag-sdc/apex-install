@@ -4,16 +4,70 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
+var ActiveConfig ContextConfig
+var VerboseMode bool
+var Sysconfdir string = "/etc"
+
+func LogV(format string, args ...interface{}) {
+	if VerboseMode {
+		fmt.Printf(format, args...)
+		if !strings.HasSuffix(format, "\n") {
+			fmt.Println()
+		}
+	}
+}
+
 func main() {
+	configFlag := flag.String("c", "", "Config file path")
+	verboseFlag := flag.Bool("v", false, "Verbose logging")
 	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
 	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
 	apiLevel := flag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
 	searchOnly := flag.Bool("search", false, "Search only, do not install or resolve dependencies")
 	updateFlag := flag.Bool("update", false, "Update local repository databases")
 	flag.Parse()
+
+	var apexConfig *ApexConfig
+	var err error
+	
+	defaultGlobalConfig := filepath.Join(Sysconfdir, "apex", "apex.conf")
+	apexConfig, err = parseApexConfig(defaultGlobalConfig, nil)
+
+	if *configFlag != "" {
+		apexConfig, err = parseApexConfig(*configFlag, apexConfig)
+	} else if os.Geteuid() != 0 {
+		apexConfig, _ = parseApexConfig("~/.config/apex/apex.conf", apexConfig)
+	}
+
+	if err != nil {
+		fmt.Printf("Warning: Failed to parse apex.conf: %v\n", err)
+	}
+	if os.Geteuid() == 0 {
+		ActiveConfig = apexConfig.Root
+	} else {
+		ActiveConfig = apexConfig.User
+	}
+	ActiveConfig.DownloadPath = expandTilde(ActiveConfig.DownloadPath)
+	ActiveConfig.InstallPath = expandTilde(ActiveConfig.InstallPath)
+	ActiveConfig.MergePath = expandTilde(ActiveConfig.MergePath)
+	ActiveConfig.DBCacheDir = expandTilde(ActiveConfig.DBCacheDir)
+	ActiveConfig.RepoPath = expandTilde(ActiveConfig.RepoPath)
+
+	VerboseMode = *verboseFlag
+
+	if *maxMicroarch == "" && ActiveConfig.MaxMicroArch != "" {
+		*maxMicroarch = ActiveConfig.MaxMicroArch
+	}
+	if *apiLevel == 0 && ActiveConfig.MaxApiLevel != "" {
+		if parsedApi, err := strconv.Atoi(ActiveConfig.MaxApiLevel); err == nil && parsedApi > 0 {
+			*apiLevel = parsedApi
+		}
+	}
 
 	if *maxMicroarch != "" && *archFlag == "" {
 		fmt.Println("Error: --max-microarch requires the --arch flag")
@@ -28,11 +82,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	repos, err := readConfig("/etc/apex/repo.conf")
+	repos, err := readRepoConfig(ActiveConfig.RepoPath)
 	if err != nil || len(repos) == 0 {
-		repos, err = readConfig("repo.conf")
+		repos, err = readRepoConfig("repo.conf")
 		if err != nil || len(repos) == 0 {
-			fmt.Println("Failed to read config or no repositories defined")
+			fmt.Println("Failed to read repo config or no repositories defined")
 			os.Exit(1)
 		}
 	}
@@ -128,7 +182,7 @@ func main() {
 			continue // do not add to installList and don't resolve dependencies
 		}
 
-		fmt.Printf("Resolved %s -> %s.%s v%s (Repo: %s)\n", target, selected.Name, resolveExtension(selected), selected.Version, selected.Repo.Name)
+		LogV("Resolved %s -> %s.%s v%s (Repo: %s)", target, selected.Name, resolveExtension(selected), selected.Version, selected.Repo.Name)
 
 		installList = append(installList, selected)
 		resolved[target] = true
@@ -155,5 +209,5 @@ func main() {
 		}
 	}
 
-	fmt.Println("All packages installed and mounted successfully!")
+	fmt.Println("All packages installed successfully!")
 }
