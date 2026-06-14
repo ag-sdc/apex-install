@@ -22,9 +22,73 @@ func LogV(format string, args ...interface{}) {
 	}
 }
 
+func handleInit() {
+	LogV("Re-initializing installed APEXes...")
+	entries, err := os.ReadDir(ActiveConfig.DownloadPath)
+	if err != nil {
+		fmt.Printf("Failed to read download path: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			pkgName := strings.TrimSuffix(entry.Name(), ".apex")
+			if strings.HasSuffix(entry.Name(), ".capex") {
+				pkgName = strings.TrimSuffix(entry.Name(), ".capex")
+			}
+			targetDir := filepath.Join(ActiveConfig.DownloadPath, entry.Name())
+			payloadImg := filepath.Join(targetDir, "apex_payload.img")
+			if _, err := os.Stat(payloadImg); err == nil {
+				LogV("Initializing %s...", pkgName)
+				if err := installLocalApex(pkgName, targetDir); err != nil {
+					fmt.Printf("Failed to initialize %s: %v\n", pkgName, err)
+				}
+			}
+		}
+	}
+}
+
+func handleLocal(libName string, nameOnly bool) {
+	entries, err := os.ReadDir(ActiveConfig.InstallPath)
+	if err != nil {
+		if !nameOnly {
+			fmt.Printf("Failed to read install path: %v\n", err)
+		}
+		os.Exit(1)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pkgName := entry.Name()
+		for _, libDir := range []string{"lib", "lib64"} {
+			libPath := filepath.Join(ActiveConfig.InstallPath, pkgName, libDir)
+			libs, err := os.ReadDir(libPath)
+			if err != nil {
+				continue
+			}
+			for _, lib := range libs {
+				if strings.Contains(lib.Name(), libName) {
+					if nameOnly {
+						fmt.Println(pkgName)
+					} else {
+						fmt.Printf("Found in: %s (at %s)\n", pkgName, filepath.Join(libPath, lib.Name()))
+					}
+					os.Exit(0)
+				}
+			}
+		}
+	}
+	os.Exit(1)
+}
+
 func main() {
 	configFlag := flag.String("c", "", "Config file path")
 	verboseFlag := flag.Bool("v", false, "Verbose logging")
+	initFlag := flag.Bool("init", false, "Re-mount and symlink all installed APEXes")
+	localFlag := flag.String("local", "", "Search installed packages for a library name")
+	nameFlag := flag.Bool("name", false, "Show only the package name when using --local")
 	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
 	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
 	apiLevel := flag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
@@ -59,6 +123,15 @@ func main() {
 	ActiveConfig.RepoPath = expandTilde(ActiveConfig.RepoPath)
 
 	VerboseMode = *verboseFlag
+
+	if *initFlag {
+		handleInit()
+		os.Exit(0)
+	}
+
+	if *localFlag != "" {
+		handleLocal(*localFlag, *nameFlag)
+	}
 
 	if *maxMicroarch == "" && ActiveConfig.MaxMicroArch != "" {
 		*maxMicroarch = ActiveConfig.MaxMicroArch

@@ -189,14 +189,19 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	zr.Close()
 	os.Remove(tmpFile)
 
+	return installLocalApex(cand.Name, targetDir)
+}
+
+func installLocalApex(pkgName, targetDir string) error {
 	payloadImg := filepath.Join(targetDir, "apex_payload.img")
 	if _, err := os.Stat(payloadImg); err != nil {
-		return fmt.Errorf("apex_payload.img not found")
+		return fmt.Errorf("apex_payload.img not found in %s", targetDir)
 	}
 
-	mountPoint := filepath.Join(ActiveConfig.InstallPath, cand.Name)
+	mountPoint := filepath.Join(ActiveConfig.InstallPath, pkgName)
 	os.MkdirAll(mountPoint, 0755)
 
+	var err error
 	mountMode := ActiveConfig.MountMode
 	switch mountMode {
 	case "auto":
@@ -220,7 +225,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 				break
 			}
 
-			return fmt.Errorf("all mount/fuse/extract methods failed for %s", cand.Name)
+			return fmt.Errorf("all mount/fuse/extract methods failed for %s", pkgName)
 		}
 	case "mount":
 		err = mountApex(payloadImg, mountPoint)
@@ -239,8 +244,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		}
 	}
 
-	createSymlinks(cand.Name)
-
+	createSymlinks(pkgName)
 	return nil
 }
 
