@@ -8,7 +8,7 @@ var stableABI = map[string]bool{
 	"libjnigraphics.so": true, "liblog.so": true, "libmediandk.so": true,
 	"libm.so": true, "libnativewindow.so": true, "libOpenMAXAL.so": true,
 	"libOpenSLES.so": true, "libstdc++.so": true, "libsync.so": true,
-	"libvulkan.so": true, "libz.so": true, "libaaudio.so": true,
+	"libvulkan.so": true, "libaaudio.so": true,
 	"libamidi.so": true, "libbinder_ndk.so": true, "libneuralnetworks.so": true,
 }
 

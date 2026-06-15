@@ -148,7 +148,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	targets := flag.Args()
+	rawTargets := flag.Args()
+	var targets []string
+	seenArg := make(map[string]bool)
+	for _, t := range rawTargets {
+		if !seenArg[t] {
+			seenArg[t] = true
+			targets = append(targets, t)
+		}
+	}
 	if len(targets) == 0 && !*updateFlag {
 		fmt.Println("Usage: apex-install [options] <target1> [target2] ...")
 		flag.PrintDefaults()
@@ -256,6 +264,19 @@ func main() {
 		}
 
 		LogV("Resolved %s -> %s.%s v%s (Repo: %s)", target, selected.Name, resolveExtension(selected), selected.Version, selected.Repo.Name)
+
+		mountPoint := filepath.Join(ActiveConfig.InstallPath, selected.Name)
+		if _, err := os.Stat(mountPoint); err == nil && !*updateFlag {
+			LogV("Package %s is already installed. Skipping.", selected.Name)
+			resolved[target] = true
+			resolved[selected.Name] = true
+			for _, dep := range selected.Depends {
+				if !resolved[dep] {
+					queue = append(queue, dep)
+				}
+			}
+			continue
+		}
 
 		installList = append(installList, selected)
 		resolved[target] = true

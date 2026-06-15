@@ -116,6 +116,11 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		apiLevelSegment = "29"
 	}
 
+	mountPoint := filepath.Join(ActiveConfig.InstallPath, cand.Name)
+	if _, err := os.Stat(mountPoint); err == nil {
+		uninstallApex(cand.Name)
+	}
+
 	ext := resolveExtension(cand)
 	orgPath := strings.ReplaceAll(cand.Name, ".", "/")
 	pkgFilename := fmt.Sprintf("%s.%s", cand.Version, ext)
@@ -265,6 +270,57 @@ func linkContents(srcDir, destDir string) {
 			os.Symlink(srcPath, destPath)
 		}
 	}
+}
+
+func unlinkContents(srcDir, destDir string) {
+	if stat, err := os.Stat(srcDir); err != nil || !stat.IsDir() {
+		return
+	}
+	entries, _ := os.ReadDir(srcDir)
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		destPath := filepath.Join(destDir, entry.Name())
+
+		if entry.IsDir() {
+			unlinkContents(srcPath, destPath)
+		} else {
+			if linkTarget, err := os.Readlink(destPath); err == nil {
+				if linkTarget == srcPath {
+					os.Remove(destPath)
+				}
+			}
+		}
+	}
+}
+
+func uninstallApex(pkgName string) error {
+	LogV("Uninstalling previous version of %s...", pkgName)
+	mountPoint := filepath.Join(ActiveConfig.InstallPath, pkgName)
+	mergePoint := ActiveConfig.MergePath
+
+	includesSrc := filepath.Join(mountPoint, "includes")
+	if _, err := os.Stat(includesSrc); os.IsNotExist(err) {
+		includesSrc = filepath.Join(mountPoint, "include") // Fallback
+	}
+	unlinkContents(includesSrc, filepath.Join(mergePoint, "include"))
+	unlinkContents(filepath.Join(mountPoint, "lib"), filepath.Join(mergePoint, "lib"))
+	
+	pkgConfigDash := filepath.Join(mountPoint, "lib", "pkg-config")
+	if stat, err := os.Stat(pkgConfigDash); err == nil && stat.IsDir() {
+		unlinkContents(pkgConfigDash, filepath.Join(mergePoint, "lib", "pkgconfig"))
+	}
+	unlinkContents(filepath.Join(mountPoint, "bin"), filepath.Join(mergePoint, "bin"))
+	unlinkContents(filepath.Join(mountPoint, "share"), filepath.Join(mergePoint, "share"))
+
+	exec.Command("umount", mountPoint).Run()
+	exec.Command("fusermount", "-u", mountPoint).Run()
+	exec.Command("fusermount3", "-u", mountPoint).Run()
+
+	os.RemoveAll(mountPoint)
+	os.RemoveAll(filepath.Join(ActiveConfig.DownloadPath, pkgName+".apex"))
+	os.RemoveAll(filepath.Join(ActiveConfig.DownloadPath, pkgName+".capex"))
+
+	return nil
 }
 
 func createSymlinks(pkgName string) {
