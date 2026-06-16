@@ -1,16 +1,18 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/spf13/pflag"
 )
 
 var ActiveConfig ContextConfig
 var VerboseMode bool
+var DownloadOnlyMode bool
 var Sysconfdir string = "/etc"
 
 func LogV(format string, args ...interface{}) {
@@ -18,6 +20,25 @@ func LogV(format string, args ...interface{}) {
 		fmt.Printf(format, args...)
 		if !strings.HasSuffix(format, "\n") {
 			fmt.Println()
+		}
+	}
+}
+
+func preProcessArgs() {
+	if len(os.Args) < 2 {
+		return
+	}
+	cmd := os.Args[1]
+	if !strings.HasPrefix(cmd, "-") {
+		switch cmd {
+		case "install":
+			os.Args[1] = "-S"
+		case "remove":
+			os.Args[1] = "-R"
+		case "local":
+			os.Args[1] = "-Q"
+		case "init":
+			os.Args[1] = "-i"
 		}
 	}
 }
@@ -84,17 +105,47 @@ func handleLocal(libName string, nameOnly bool) {
 }
 
 func main() {
-	configFlag := flag.String("c", "", "Config file path")
-	verboseFlag := flag.Bool("v", false, "Verbose logging")
-	initFlag := flag.Bool("init", false, "Re-mount and symlink all installed APEXes")
-	localFlag := flag.String("local", "", "Search installed packages for a library name")
-	nameFlag := flag.Bool("name", false, "Show only the package name when using --local")
-	archFlag := flag.String("arch", "", "Target architecture (required if --max-microarch is set)")
-	maxMicroarch := flag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
-	apiLevel := flag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
-	searchOnly := flag.Bool("search", false, "Search only, do not install or resolve dependencies")
-	updateFlag := flag.Bool("update", false, "Update local repository databases")
-	flag.Parse()
+	preProcessArgs()
+
+	pflag.CommandLine.SortFlags = false
+
+	configFlag := pflag.StringP("config", "c", "", "Config file path")
+	verboseFlag := pflag.BoolP("verbose", "v", false, "Verbose logging")
+	
+	installMode := pflag.BoolP("install", "S", false, "Install packages")
+	removeMode := pflag.BoolP("remove", "R", false, "Remove packages")
+	localMode := pflag.BoolP("local", "Q", false, "Search installed packages for a library name")
+	initMode := pflag.BoolP("init", "i", false, "Re-mount and symlink all installed APEXes")
+
+	updateFlag := pflag.BoolP("update", "u", false, "Update local repository databases (and override installed)")
+	searchFlag := pflag.BoolP("search", "s", false, "Search only, do not install or resolve dependencies")
+	downloadFlag := pflag.BoolP("download", "d", false, "Download only, do not extract or mount")
+
+	nameFlag := pflag.Bool("name", false, "Show only the package name when using -Q")
+	archFlag := pflag.String("arch", "", "Target architecture (required if --max-microarch is set)")
+	maxMicroarch := pflag.String("max-microarch", "", "Highest microarchitecture level to download (prioritizes higher microarch)")
+	apiLevel := pflag.Int("api-level", 0, "Highest API level to download (prioritizes higher api-level, min 29)")
+	
+	pflag.ErrHelp = fmt.Errorf("pflag: help requested")
+	pflag.Parse()
+
+	modesActive := 0
+	if *installMode { modesActive++ }
+	if *removeMode { modesActive++ }
+	if *localMode { modesActive++ }
+	if *initMode { modesActive++ }
+
+	if modesActive > 1 {
+		fmt.Println("Error: only one operation may be used at a time")
+		os.Exit(1)
+	}
+
+	targets := pflag.Args()
+	if modesActive == 0 && !*updateFlag && !*searchFlag {
+		fmt.Println("Usage: apexm [operation] [options] <target1> [target2] ...")
+		pflag.PrintDefaults()
+		os.Exit(1)
+	}
 
 	var apexConfig *ApexConfig
 	var err error
@@ -123,14 +174,34 @@ func main() {
 	ActiveConfig.RepoPath = expandTilde(ActiveConfig.RepoPath)
 
 	VerboseMode = *verboseFlag
+	DownloadOnlyMode = *downloadFlag
 
-	if *initFlag {
+	if *initMode {
 		handleInit()
 		os.Exit(0)
 	}
 
-	if *localFlag != "" {
-		handleLocal(*localFlag, *nameFlag)
+	if *localMode {
+		if len(targets) == 0 {
+			fmt.Println("Error: no library name specified for local query")
+			os.Exit(1)
+		}
+		handleLocal(targets[0], *nameFlag)
+	}
+
+	if *removeMode {
+		if len(targets) == 0 {
+			fmt.Println("Error: no targets specified for removal")
+			os.Exit(1)
+		}
+		for _, t := range targets {
+			if err := uninstallApex(t); err != nil {
+				fmt.Printf("Error removing %s: %v\n", t, err)
+			} else {
+				fmt.Printf("Successfully removed %s\n", t)
+			}
+		}
+		os.Exit(0)
 	}
 
 	if *maxMicroarch == "" && ActiveConfig.MaxMicroArch != "" {
@@ -144,14 +215,7 @@ func main() {
 
 	if *maxMicroarch != "" && *archFlag == "" {
 		fmt.Println("Error: --max-microarch requires the --arch flag")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	targets := flag.Args()
-	if len(targets) == 0 && !*updateFlag {
-		fmt.Println("Usage: apex-install [options] <target1> [target2] ...")
-		flag.PrintDefaults()
+		pflag.PrintDefaults()
 		os.Exit(1)
 	}
 
@@ -171,14 +235,14 @@ func main() {
 		}
 	}
 
-	if !*searchOnly {
+	if !*searchFlag {
 		fmt.Fprintln(os.Stderr, "Fetching repository metadata...")
 	}
 	caches := make([]*RegistryCache, len(repos))
 	for i, repo := range repos {
 		cache, err := fetchRepoData(i, repo)
 		if err != nil {
-			if !*searchOnly {
+			if !*searchFlag {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to fetch metadata for repo %s: %v\n", repo.Name, err)
 			}
 			continue
@@ -245,7 +309,7 @@ func main() {
 		sortCandidates(candidates, *maxMicroarch)
 		selected := candidates[0]
 
-		if *searchOnly {
+		if *searchFlag {
 			ext := resolveExtension(selected)
 			microarchStr := selected.MicroArch
 			if !strings.HasPrefix(microarchStr, "v") {
@@ -287,7 +351,7 @@ func main() {
 		}
 	}
 
-	if *searchOnly {
+	if *searchFlag {
 		return // we just exit
 	}
 

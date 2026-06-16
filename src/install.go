@@ -169,6 +169,11 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		return err
 	}
 
+	if DownloadOnlyMode {
+		LogV("Download-only mode active. Skipping extraction for %s", cand.Name)
+		return nil
+	}
+
 	zr, err := zip.OpenReader(tmpFile)
 	if err != nil {
 		return err
