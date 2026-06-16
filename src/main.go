@@ -148,15 +148,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rawTargets := flag.Args()
-	var targets []string
-	seenArg := make(map[string]bool)
-	for _, t := range rawTargets {
-		if !seenArg[t] {
-			seenArg[t] = true
-			targets = append(targets, t)
-		}
-	}
+	targets := flag.Args()
 	if len(targets) == 0 && !*updateFlag {
 		fmt.Println("Usage: apex-install [options] <target1> [target2] ...")
 		flag.PrintDefaults()
@@ -264,6 +256,11 @@ func main() {
 		}
 
 		LogV("Resolved %s -> %s.%s v%s (Repo: %s)", target, selected.Name, resolveExtension(selected), selected.Version, selected.Repo.Name)
+
+		if resolved[selected.Name] {
+			resolved[target] = true
+			continue
+		}
 
 		mountPoint := filepath.Join(ActiveConfig.InstallPath, selected.Name)
 		if _, err := os.Stat(mountPoint); err == nil && !*updateFlag {
