@@ -1,4 +1,4 @@
-pkgname=apex-install
+pkgname=apexm
 pkgver=0.0.1
 pkgrel=1
 pkgdesc="Automated APEX package installer via Forgejo registry"
@@ -8,8 +8,11 @@ license=('MIT')
 depends=('glibc')
 makedepends=('go' 'meson' 'ninja')
 source=("apex-install::git+file://${startdir}/../../")
+conflicts=('apex-install')
+replaces=('apex-install')
+provides=('apex-install')
 md5sums=('SKIP')
-backup=('etc/apex/repo.conf')
+backup=('etc/apex/repo.conf' 'etc/apex/apex.conf')
 
 build() {
   cd "$srcdir/$pkgname"

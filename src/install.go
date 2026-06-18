@@ -104,6 +104,34 @@ func fuseApex(payloadImg, mountPoint string) error {
 	return nil
 }
 
+func extractZip(zipFile, targetDir string) error {
+	zr, err := zip.OpenReader(zipFile)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+
+	for _, f := range zr.File {
+		path := filepath.Join(targetDir, f.Name)
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(path, 0755)
+			continue
+		}
+		os.MkdirAll(filepath.Dir(path), 0755)
+		outFile, err := os.Create(path)
+		if err != nil {
+			continue
+		}
+		rc, err := f.Open()
+		if err == nil {
+			io.Copy(outFile, rc)
+			rc.Close()
+		}
+		outFile.Close()
+	}
+	return nil
+}
+
 func downloadAndExtract(cand *PackageCandidate) error {
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
 	archSegment := cand.Arch
@@ -174,30 +202,21 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		return nil
 	}
 
-	zr, err := zip.OpenReader(tmpFile)
+	err = extractZip(tmpFile, targetDir)
+	os.Remove(tmpFile)
 	if err != nil {
 		return err
 	}
-	for _, f := range zr.File {
-		path := filepath.Join(targetDir, f.Name)
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, 0755)
-			continue
-		}
-		os.MkdirAll(filepath.Dir(path), 0755)
-		outFile, err := os.Create(path)
+
+	originalApex := filepath.Join(targetDir, "original_apex")
+	if _, err := os.Stat(originalApex); err == nil {
+		LogV("Detected CAPEX package, extracting original_apex...")
+		err = extractZip(originalApex, targetDir)
+		os.Remove(originalApex)
 		if err != nil {
-			continue
+			return err
 		}
-		rc, err := f.Open()
-		if err == nil {
-			io.Copy(outFile, rc)
-			rc.Close()
-		}
-		outFile.Close()
 	}
-	zr.Close()
-	os.Remove(tmpFile)
 
 	return installLocalApex(cand.Name, targetDir)
 }
