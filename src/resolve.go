@@ -42,6 +42,10 @@ func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
 }
 
 func resolveExtension(cand *PackageCandidate) string {
+	if cand.Type != "" {
+		return cand.Type
+	}
+
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
 	archSegment := cand.Arch
 	if dirMicroArch != "" {

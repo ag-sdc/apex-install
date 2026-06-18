@@ -38,7 +38,7 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 		Providers: make(map[string][]string),
 	}
 
-	syncDir := "/var/cache/apex/sync"
+	syncDir := repo.SyncDir
 	if _, err := os.Stat(syncDir); os.IsNotExist(err) {
 		os.MkdirAll(syncDir, 0755)
 	}
@@ -90,6 +90,9 @@ func fetchRepoData(repoIndex int, repo *RepoConfig) (*RegistryCache, error) {
 				ApiLevel:     parts[3],
 				Version:      parts[4],
 				// Size is parts[5], but we don't strictly need it right now for the candidate struct
+			}
+			if len(parts) >= 7 {
+				cand.Type = parts[6]
 			}
 
 			if repo.MinMicroArch != "" && parseMicroArch(cand.MicroArch) < parseMicroArch(repo.MinMicroArch) {

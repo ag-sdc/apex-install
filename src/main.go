@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +10,23 @@ import (
 
 	"github.com/spf13/pflag"
 )
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
 
 var ActiveConfig ContextConfig
 var VerboseMode bool
@@ -115,7 +133,10 @@ func main() {
 	installMode := pflag.BoolP("install", "S", false, "Install packages")
 	removeMode := pflag.BoolP("remove", "R", false, "Remove packages")
 	localMode := pflag.BoolP("local", "Q", false, "Search installed packages for a library name")
-	initMode := pflag.BoolP("init", "i", false, "Re-mount and symlink all installed APEXes")
+	initMode := pflag.Bool("init", false, "Re-mount and symlink all installed APEXes")
+
+	isolatedFlag := pflag.BoolP("isolated", "i", false, "Isolated mode: ignore system states (user) or operate on rootdir (system)")
+	rootDirFlag := pflag.StringP("rootdir", "r", "", "Root directory for isolated system operations")
 
 	updateFlag := pflag.BoolP("update", "u", false, "Update local repository databases (and override installed)")
 	searchFlag := pflag.BoolP("search", "s", false, "Search only, do not install or resolve dependencies")
@@ -151,19 +172,45 @@ func main() {
 	var err error
 	
 	defaultGlobalConfig := filepath.Join(Sysconfdir, "apex", "apex.conf")
-	apexConfig, err = parseApexConfig(defaultGlobalConfig, nil)
+	isRoot := os.Geteuid() == 0
+
+	if !isRoot && *isolatedFlag {
+		apexConfig, err = parseApexConfig("~/.config/apex/apex.conf", nil)
+	} else {
+		apexConfig, err = parseApexConfig(defaultGlobalConfig, nil)
+		if !isRoot {
+			apexConfig, _ = parseApexConfig("~/.config/apex/apex.conf", apexConfig)
+		}
+	}
 
 	if *configFlag != "" {
 		apexConfig, err = parseApexConfig(*configFlag, apexConfig)
-	} else if os.Geteuid() != 0 {
-		apexConfig, _ = parseApexConfig("~/.config/apex/apex.conf", apexConfig)
 	}
 
 	if err != nil {
 		fmt.Printf("Warning: Failed to parse apex.conf: %v\n", err)
 	}
-	if os.Geteuid() == 0 {
+
+	if isRoot {
 		ActiveConfig = apexConfig.Root
+		if *isolatedFlag {
+			if *rootDirFlag == "" {
+				fmt.Println("Error: --rootdir/-r must be provided when running as root with --isolated")
+				os.Exit(1)
+			}
+			
+			// Copy system configs into rootDir
+			os.MkdirAll(filepath.Join(*rootDirFlag, filepath.Dir(defaultGlobalConfig)), 0755)
+			copyFile(defaultGlobalConfig, filepath.Join(*rootDirFlag, defaultGlobalConfig))
+			os.MkdirAll(filepath.Join(*rootDirFlag, filepath.Dir(ActiveConfig.RepoPath)), 0755)
+			copyFile(ActiveConfig.RepoPath, filepath.Join(*rootDirFlag, ActiveConfig.RepoPath))
+
+			ActiveConfig.InstallPath = filepath.Join(*rootDirFlag, "apex")
+			ActiveConfig.DownloadPath = filepath.Join(*rootDirFlag, "opt", "apex")
+			ActiveConfig.MergePath = filepath.Join(*rootDirFlag, "apex")
+			ActiveConfig.DBCacheDir = filepath.Join(*rootDirFlag, "var", "cache", "apex", "sync")
+			ActiveConfig.RepoPath = filepath.Join(*rootDirFlag, ActiveConfig.RepoPath)
+		}
 	} else {
 		ActiveConfig = apexConfig.User
 	}
@@ -219,12 +266,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	repos, err := readRepoConfig(ActiveConfig.RepoPath)
+	repos, err := readRepoConfig(ActiveConfig.RepoPath, ActiveConfig.DBCacheDir)
 	if err != nil || len(repos) == 0 {
-		repos, err = readRepoConfig("repo.conf")
+		repos, err = readRepoConfig("repo.conf", ActiveConfig.DBCacheDir)
 		if err != nil || len(repos) == 0 {
 			fmt.Println("Failed to read repo config or no repositories defined")
 			os.Exit(1)
+		}
+	}
+
+	if !isRoot && !*isolatedFlag {
+		if systemRepos, err := readRepoConfig(apexConfig.Root.RepoPath, apexConfig.Root.DBCacheDir); err == nil {
+			repos = append(repos, systemRepos...)
 		}
 	}
 
@@ -326,17 +379,19 @@ func main() {
 			continue
 		}
 
+		// Check if installed locally
 		mountPoint := filepath.Join(ActiveConfig.InstallPath, selected.Name)
-		if _, err := os.Stat(mountPoint); err == nil && !*updateFlag {
+		if _, err := os.Stat(mountPoint); err == nil {
 			LogV("Package %s is already installed. Skipping.", selected.Name)
-			resolved[target] = true
-			resolved[selected.Name] = true
-			for _, dep := range selected.Depends {
-				if !resolved[dep] {
-					queue = append(queue, dep)
-				}
+			continue // do not add to installList and don't resolve dependencies
+		}
+
+		if !isRoot && !*isolatedFlag {
+			sysMountPoint := filepath.Join(apexConfig.Root.InstallPath, selected.Name)
+			if _, err := os.Stat(sysMountPoint); err == nil {
+				LogV("Package %s is already installed in system. Skipping.", selected.Name)
+				continue
 			}
-			continue
 		}
 
 		installList = append(installList, selected)

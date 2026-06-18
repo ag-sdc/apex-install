@@ -8,6 +8,7 @@ type PackageCandidate struct {
 	Arch         string
 	MicroArch    string
 	ApiLevel     string
+	Type         string
 	Depends      []string
 	Provides     []string
 }

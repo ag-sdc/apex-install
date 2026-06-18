@@ -17,6 +17,7 @@ type RepoConfig struct {
 	MinMicroArch string
 	MaxApiLevel  string
 	MinApiLevel  string
+	SyncDir      string
 }
 
 type ContextConfig struct {
@@ -153,7 +154,7 @@ func parseApexConfig(path string, baseConfig *ApexConfig) (*ApexConfig, error) {
 	return config, scanner.Err()
 }
 
-func readRepoConfig(path string) ([]*RepoConfig, error) {
+func readRepoConfig(path string, syncDir string) ([]*RepoConfig, error) {
 	file, err := os.Open(expandTilde(path))
 	if err != nil {
 		return nil, err
@@ -171,7 +172,8 @@ func readRepoConfig(path string) ([]*RepoConfig, error) {
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			currentRepo = &RepoConfig{
-				Name: line[1 : len(line)-1],
+				Name:    line[1 : len(line)-1],
+				SyncDir: syncDir,
 			}
 			repos = append(repos, currentRepo)
 			continue
