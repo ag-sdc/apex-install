@@ -1,0 +1,173 @@
+# bash completion for apexm                                -*- shell-script -*-
+
+_apexm_installed_pkgs() {
+    apexm list 2>/dev/null
+    local d
+    for d in /apex ~/.apex/mnt /opt/apex ~/.apex/opt; do
+        if [[ -d "$d" ]]; then
+            command ls -1 "$d" 2>/dev/null | command sed -e 's/\.apex$//' -e 's/\.capex$//'
+        fi
+    done
+}
+
+_apexm_repo_pkgs() {
+    local cache_dirs=("/var/cache/apex/sync" "$HOME/.cache/apex/sync")
+    local dir db
+    for dir in "${cache_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            for db in "$dir"/*.db; do
+                if [[ -f "$db" ]]; then
+                    command awk '{print $1}' "$db" 2>/dev/null
+                fi
+            done
+        fi
+    done
+}
+
+_apexm_repo_libs() {
+    local cache_dirs=("/var/cache/apex/sync" "$HOME/.cache/apex/sync")
+    local dir prov
+    for dir in "${cache_dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            for prov in "$dir"/*.providers; do
+                if [[ -f "$prov" ]]; then
+                    command awk '{print $1}' "$prov" 2>/dev/null
+                fi
+            done
+        fi
+    done
+}
+
+_apexm_installed_libs() {
+    local d
+    for d in /apex ~/.apex/mnt /opt/apex ~/.apex/opt; do
+        if [[ -d "$d" ]]; then
+            command find "$d" -maxdepth 3 -type f -name "*.so*" 2>/dev/null | command awk -F/ '{print $NF}'
+        fi
+    done
+}
+
+_apexm() {
+    local cur prev words cword
+    if declare -f _init_completion >/dev/null 2>&1; then
+        _init_completion -n : || return
+    else
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    fi
+
+    local subcommands="install remove search update download local list init"
+    local opts="-c --config -v --verbose -S --install -R --remove -Q --local -Qs -Ss -Sl -Su -Sd --init --list -i --isolated -r --rootdir -u --update -s --search -d --download -l --library -y --noconfirm -n --name --arch --max-microarch --api-level --api --api-level-exact --api-exact"
+
+    local prev_opt="$prev"
+    case "$prev_opt" in
+        -c|--config)
+            if declare -f _filedir >/dev/null 2>&1; then
+                _filedir
+            fi
+            return
+            ;;
+        -r|--rootdir)
+            if declare -f _filedir >/dev/null 2>&1; then
+                _filedir -d
+            fi
+            return
+            ;;
+        --arch)
+            COMPREPLY=( $(compgen -W "x86_64 aarch64 arm x86 riscv64" -- "$cur") )
+            return
+            ;;
+        --max-microarch)
+            COMPREPLY=( $(compgen -W "v1 v2 v3 v4 v8_0 v8_1 v8_2 v8_3 v8_4 v8_5 v8_6 v8_7 v9_0" -- "$cur") )
+            return
+            ;;
+        --api-level|--api|--api-level-exact|--api-exact)
+            COMPREPLY=( $(compgen -W "29 30 31 32 33 34 35" -- "$cur") )
+            return
+            ;;
+    esac
+
+    # Determine mode/operation from arguments
+    local op=""
+    local has_lib=0
+    local has_search=0
+    local has_name=0
+    local i
+    for (( i=1; i < ${#words[@]}-1; i++ )); do
+        case "${words[i]}" in
+            install|-S|--install) op="install" ;;
+            remove|-R|--remove) op="remove" ;;
+            search|-Ss|-s|--search) op="search" ;;
+            update|-Su|-u|--update) op="update" ;;
+            download|-Sd|-d|--download) op="download" ;;
+            local|-Q|--local|-Qs) op="local" ;;
+            list|--list) op="list" ;;
+            init|--init) op="init" ;;
+        esac
+        if [[ "${words[i]}" == *s* && "${words[i]}" == -* ]]; then
+            has_search=1
+        fi
+        if [[ "${words[i]}" == "--search" || "${words[i]}" == "search" ]]; then
+            has_search=1
+        fi
+        if [[ "${words[i]}" == *l* && "${words[i]}" == -* ]]; then
+            has_lib=1
+        fi
+        if [[ "${words[i]}" == "--library" ]]; then
+            has_lib=1
+        fi
+        if [[ "${words[i]}" == "--name" || "${words[i]}" == "-n" || ( "${words[i]}" == -* && "${words[i]}" == *n* ) ]]; then
+            has_name=1
+        fi
+    done
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        return
+    fi
+
+    # Position 1 without leading dash -> subcommands
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$subcommands $opts" -- "$cur") )
+        return
+    fi
+
+    case "$op" in
+        remove)
+            local installed
+            installed=$( _apexm_installed_pkgs | command sort -u )
+            COMPREPLY=( $(compgen -W "$installed" -- "$cur") )
+            ;;
+        local)
+            local installed_libs
+            installed_libs=$( { _apexm_installed_libs; _apexm_repo_libs; } | command sort -u )
+            if [[ $has_search -eq 1 ]]; then
+                local installed
+                installed=$( _apexm_installed_pkgs | command sort -u )
+                if [[ $has_name -eq 1 ]]; then
+                    COMPREPLY=( $(compgen -W "$installed" -- "$cur") )
+                elif [[ $has_lib -eq 1 ]]; then
+                    COMPREPLY=( $(compgen -W "$installed_libs" -- "$cur") )
+                else
+                    COMPREPLY=( $(compgen -W "$installed $installed_libs" -- "$cur") )
+                fi
+            else
+                COMPREPLY=( $(compgen -W "$installed_libs" -- "$cur") )
+            fi
+            ;;
+        install|download|search|"")
+            if [[ $has_lib -eq 1 ]]; then
+                local libs
+                libs=$( _apexm_repo_libs | command sort -u )
+                COMPREPLY=( $(compgen -W "$libs" -- "$cur") )
+            else
+                local pkgs
+                pkgs=$( _apexm_repo_pkgs | command sort -u )
+                COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") )
+            fi
+            ;;
+    esac
+} &&
+complete -F _apexm apexm

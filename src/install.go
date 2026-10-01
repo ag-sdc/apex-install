@@ -181,7 +181,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		return fmt.Errorf("failed to download package: %s", resp.Status)
 	}
 
-	targetDir := filepath.Join(ActiveConfig.DownloadPath, fmt.Sprintf("%s.apex", cand.Name))
+	targetDir := filepath.Join(ActiveConfig.DownloadPath, fmt.Sprintf("%s@%s.apex", cand.Name, cand.Version))
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %v", targetDir, err)
 	}
@@ -343,6 +343,16 @@ func uninstallApex(pkgName string) error {
 	os.RemoveAll(mountPoint)
 	os.RemoveAll(filepath.Join(ActiveConfig.DownloadPath, pkgName+".apex"))
 	os.RemoveAll(filepath.Join(ActiveConfig.DownloadPath, pkgName+".capex"))
+	if matches, err := filepath.Glob(filepath.Join(ActiveConfig.DownloadPath, pkgName+"@*.apex")); err == nil {
+		for _, m := range matches {
+			os.RemoveAll(m)
+		}
+	}
+	if matches, err := filepath.Glob(filepath.Join(ActiveConfig.DownloadPath, pkgName+"@*.capex")); err == nil {
+		for _, m := range matches {
+			os.RemoveAll(m)
+		}
+	}
 
 	return nil
 }

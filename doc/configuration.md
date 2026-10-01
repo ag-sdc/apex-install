@@ -1,6 +1,6 @@
 # Configuration Guide
 
-`apex-install` uses an INI-style configuration file to define one or more Forgejo APEX package registries. The tool searches all defined repositories in the order they appear in the file.
+`apexm` uses an INI-style configuration file to define one or more Forgejo APEX package registries. The tool searches all defined repositories in the order they appear in the file.
 
 ## File Location
 

@@ -1,0 +1,96 @@
+.TH APEXM 1 "July 2026" "apexm 1.0.0" "User Commands"
+.SH NAME
+apexm \- Android APEX package manager
+.SH SYNOPSIS
+.B apexm
+\fI<operation>\fR [\fIoptions\fR] [\fItargets...\fR]
+.SH DESCRIPTION
+\fBapexm\fR is an Android APEX package manager for Linux. It resolves, downloads, and mounts APEX/CAPEX packages from Forgejo package registries. It supports dependency resolution by library name (with \fB\-l\fR), version pinning, optimal architecture selection, and user/root execution contexts.
+.SH OPERATIONS
+.TP
+.BR install ", " \-S " (or " \-Sl ")"
+Install packages and mount them. Requires target names. Use \-Sl to install by library name.
+.TP
+.BR remove ", " \-R
+Remove installed packages and unmount them.
+.TP
+.BR search ", " \-Ss
+Search configured repositories for packages matching the target.
+.TP
+.BR local ", " \-Qs " (or " \-Q " " \-s ", " local " " \-s ")"
+Search locally installed packages matching the target.
+.TP
+.BR update ", " \-Su
+Sync repository databases to get the latest package lists.
+.TP
+.BR download ", " \-Sd
+Download packages without installing or mounting them.
+.TP
+.BR local ", " \-Q
+Query locally installed packages matching the target library.
+.TP
+.BR list ", " \-\-list
+List all installed packages.
+.TP
+.BR init ", " \-\-init
+Re-mount all previously installed packages (useful after reboot).
+.SH OPTIONS
+.TP
+.BI \-\-config " path"
+Specify a custom configuration file path.
+.TP
+.BR \-l ", " \-\-library
+Treat install targets as library names rather than package names.
+.TP
+.BR \-y ", " \-\-noconfirm
+Skip interactive prompts (e.g. provider pickers) and auto-select defaults.
+.TP
+.B \-\-verbose
+Enable verbose output for debugging.
+.TP
+.B \-\-isolated
+Run in isolated mode for build environments, keeping everything local to the rootdir.
+.TP
+.BI \-\-rootdir " path"
+Specify the base directory for APEX storage and mounts (default is /apex for root, ~/.apex for user).
+.TP
+.BI \-\-arch " architecture"
+Force the tool to query a specific architecture.
+.TP
+.BI \-\-max-microarch " level"
+Specify the highest microarchitecture level to download (e.g. v3 for x86_64).
+.TP
+.BI \-\-api-level " level" ", " \-\-api " level"
+Specify the highest Android API level to download (upper bound / maximum API level).
+.TP
+.BI \-\-api-level-exact " level" ", " \-\-api-exact " level"
+Filter packages strictly to an exact Android API level. Takes precedence over \fB\-\-api-level\fR and \fB\-\-api\fR.
+.TP
+.BR \-n ", " \-\-name
+Show only package name or restrict target matching strictly to package name (do not search library dependencies).
+.SH TARGET SYNTAX
+Targets can be a package name (e.g., \fIcom.android.vulkan\fR).
+When using the \fB\-l\fR or \fB\-\-library\fR flag, targets are treated as library names (e.g., \fIlibvulkan.so\fR).
+.PP
+Version Pinning: You can pin a specific versionCode by appending \fB@versionCode\fR to the target name.
+.br
+Example: \fBapexm install -Sl libvulkan.so@1300\fR
+.SH CONFIGURATION
+.B apexm
+uses an INI-style configuration file to define Forgejo APEX registries. The tool searches all defined repositories in the order they appear. Repositories listed earlier have higher priority.
+.SH FILES
+.TP
+.I /etc/apex/repo.conf
+System-wide configuration file.
+.TP
+.I ~/.config/apex/repo.conf
+User-specific configuration file.
+.TP
+.I /apex/
+Default system-wide mount point and storage directory (root mode).
+.TP
+.I ~/.apex/
+Default user-specific mount point and storage directory (user mode).
+.SH SEE ALSO
+.BR mount (8),
+.BR losetup (8)

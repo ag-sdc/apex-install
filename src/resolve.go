@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-
-	"golang.org/x/mod/semver"
 )
 
 func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
@@ -29,16 +27,32 @@ func sortCandidates(candidates []*PackageCandidate, maxMicroarch string) {
 			return apiI > apiJ
 		}
 
-		v1 := candidates[i].Version
-		v2 := candidates[j].Version
-		if !strings.HasPrefix(v1, "v") {
-			v1 = "v" + v1
+		cmp := compareVersions(candidates[i].Version, candidates[j].Version)
+		if cmp != 0 {
+			return cmp > 0
 		}
-		if !strings.HasPrefix(v2, "v") {
-			v2 = "v" + v2
-		}
-		return semver.Compare(v1, v2) > 0 // highest version first
+		return candidates[i].Version > candidates[j].Version
 	})
+}
+
+func matchCandidateApi(cand *PackageCandidate, apiLevelExact, apiLevel int) bool {
+	if apiLevelExact > 0 {
+		return parseApiLevel(cand.ApiLevel) == apiLevelExact
+	}
+	if apiLevel > 0 {
+		return parseApiLevel(cand.ApiLevel) <= apiLevel
+	}
+	return true
+}
+
+func matchInstalledPkgApi(pkg *installedPkgInfo, apiLevelExact, apiLevel int) bool {
+	if apiLevelExact > 0 {
+		return pkg.apiLevel != "" && parseApiLevel(pkg.apiLevel) == apiLevelExact
+	}
+	if apiLevel > 0 {
+		return pkg.apiLevel != "" && parseApiLevel(pkg.apiLevel) <= apiLevel
+	}
+	return true
 }
 
 func resolveExtension(cand *PackageCandidate) string {

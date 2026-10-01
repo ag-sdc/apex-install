@@ -20,3 +20,10 @@ install_data('repo.conf.sample',
   install_dir: sysconfdir / 'apex',
   rename: 'repo.conf'
 )
+
+install_man('doc/apexm.1')
+
+install_data('completions/bash/apexm',
+  install_dir: get_option('datadir') / 'bash-completion/completions',
+  rename: 'apexm'
+)

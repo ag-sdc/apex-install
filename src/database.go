@@ -23,7 +23,12 @@ func parseMicroArch(m string) float64 {
 var __min_supported_abi = 29
 
 func parseApiLevel(a string) int {
-	if a == "" {
+	a = strings.TrimSpace(a)
+	a = strings.TrimPrefix(a, "API")
+	a = strings.TrimPrefix(a, "api")
+	a = strings.TrimSpace(a)
+	a = strings.TrimPrefix(a, "v")
+	if a == "" || a == "0" {
 		return __min_supported_abi
 	}
 	i, err := strconv.Atoi(a)
