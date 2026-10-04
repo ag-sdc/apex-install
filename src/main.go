@@ -51,7 +51,8 @@ func LogV(format string, args ...interface{}) {
 func isValFlag(arg string) bool {
 	switch arg {
 	case "-c", "--config", "-r", "--rootdir", "--arch", "--max-microarch",
-		"--api-level", "--api", "--api-level-exact", "--api-exact":
+		"--api-level", "--api", "--api-level-exact", "--api-exact",
+		"--skip-abi-level", "--skip-abi-custom":
 		return true
 	}
 	return false
@@ -938,6 +939,9 @@ func main() {
 	pflag.IntVar(apiLevel, "api", 0, "Highest API level to download (alias for --api-level)")
 	apiLevelExact := pflag.Int("api-level-exact", 0, "Filter packages strictly to an exact Android API level (takes precedence over --api-level)")
 	pflag.IntVar(apiLevelExact, "api-exact", 0, "Filter packages strictly to an exact Android API level (alias for --api-level-exact)")
+	skipAbiLevel := pflag.Int("skip-abi-level", 2, "Skip ABI level (0: none, 1: bionic libc, 2: all NDK [default], 3: NDK + VNDK)")
+	disableSkipAbis := pflag.Bool("disable-skip-abis", false, "Alias for --skip-abi-level 0 (do not skip any ABIs)")
+	skipAbiCustom := pflag.StringSlice("skip-abi-custom", nil, "Custom libraries to skip (path, lib:path, or lib name, comma-separated or repeated)")
 	
 	pflag.Usage = printUsage
 	pflag.Parse()
@@ -1114,6 +1118,18 @@ func main() {
 		caches[i] = cache
 	}
 
+	effectiveSkipAbiLevel := *skipAbiLevel
+	if *disableSkipAbis && !pflag.CommandLine.Changed("skip-abi-level") {
+		effectiveSkipAbiLevel = 0
+	}
+	customSkippedMap := parseCustomSkipAbis(*skipAbiCustom)
+	effectiveApiLevel := 0
+	if *apiLevelExact > 0 {
+		effectiveApiLevel = *apiLevelExact
+	} else if *apiLevel > 0 {
+		effectiveApiLevel = *apiLevel
+	}
+
 	queue := append([]string{}, targets...)
 	resolved := make(map[string]bool)
 	var installList []*PackageCandidate
@@ -1124,7 +1140,7 @@ func main() {
 
 		targetName, targetVersionCode := parseTarget(target)
 
-		if IsSatisfiedLib(targetName) {
+		if IsSatisfiedLibLevel(targetName, effectiveSkipAbiLevel, effectiveApiLevel, customSkippedMap) {
 			continue // skip satisfied system libs
 		}
 		if resolved[targetName] {

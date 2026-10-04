@@ -60,6 +60,9 @@ apexm install com.android.vulkan@1300
 * `--max-microarch <level>`: Specify the highest microarchitecture level to download (e.g. `v3` for `x86_64` or `v8_2` for `aarch64`).
 * `--api-level <level>`, `--api <level>`: Specify the highest Android API level to download (upper bound / maximum API level).
 * `--api-level-exact <level>`, `--api-exact <level>`: Filter packages strictly to an exact Android API level. Takes precedence over `--api-level` and `--api`.
+* `--skip-abi-level <0|1|2|3>`: Set ABI skip level during dependency resolution (0: no ABI skipped, 1: Bionic libc & related libs, 2: all NDK libs [default], 3: all NDK + VNDK libs).
+* `--disable-skip-abis`: Alias for `--skip-abi-level 0` (do not skip any base Android ABI libraries).
+* `--skip-abi-custom <entry>`: Specify custom shared libraries to skip (file path, `lib:path` mapping, library name, or directory; comma-separated or repeated).
 * `-n, --name`: Restrict target matching strictly to package name (do not search library dependencies), or show only package name in query output.
 
 ## Provider Picker

@@ -66,6 +66,15 @@ Specify the highest Android API level to download (upper bound / maximum API lev
 .BI \-\-api-level-exact " level" ", " \-\-api-exact " level"
 Filter packages strictly to an exact Android API level. Takes precedence over \fB\-\-api-level\fR and \fB\-\-api\fR.
 .TP
+.BI \-\-skip-abi-level " level"
+Set the system ABI skip level during dependency resolution: \fB0\fR (no ABI skipped), \fB1\fR (Bionic libc & related libs: libc, libm, libdl, libstdc++, libc++), \fB2\fR (all Android NDK libraries [default]), \fB3\fR (all Android NDK libraries + VNDK libraries from SDK /opt/android-sdk/vndk/v<api-level>).
+.TP
+.B \-\-disable-skip-abis
+Alias for \fB\-\-skip-abi-level 0\fR. Do not skip any system ABI libraries during dependency resolution.
+.TP
+.BI \-\-skip-abi-custom " entry"
+Specify custom shared libraries to skip during dependency resolution. Accepts file path (\fI/path/to/libfoo.so\fR), mapping (\fIlibfoo.so:/path/to/libfoo.so\fR), library name (\fIlibfoo.so\fR), or directory. Multiple values can be comma-separated or passed with repeated flags.
+.TP
 .BR \-n ", " \-\-name
 Show only package name or restrict target matching strictly to package name (do not search library dependencies).
 .SH TARGET SYNTAX

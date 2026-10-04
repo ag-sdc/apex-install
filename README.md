@@ -99,6 +99,9 @@ sudo apexm install --api 34 com.android.vulkan
 - `-n, --name`: Restrict target matching strictly to package name or show only package name in query output
 - `--api-level <level>`, `--api <level>`: Highest API level to download (upper bound / maximum API level)
 - `--api-level-exact <level>`, `--api-exact <level>`: Filter packages strictly to an exact Android API level (takes precedence over `--api-level`/`--api`)
+- `--skip-abi-level <0|1|2|3>`: Set ABI skip level during dependency resolution (0: none, 1: Bionic libc, 2: all NDK [default], 3: NDK + VNDK)
+- `--disable-skip-abis`: Alias for `--skip-abi-level 0` (do not skip any system ABIs)
+- `--skip-abi-custom <entry>`: Custom libraries to skip (file path, `lib:path` mapping, library name, or directory; comma-separated or repeated)
 - `--arch <architecture>`: Target architecture (required if `--max-microarch` is set)
 - `--max-microarch <level>`: Highest microarchitecture level to download
 - `--config <path>`: Specify custom configuration file path

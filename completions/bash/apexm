@@ -59,7 +59,7 @@ _apexm() {
     fi
 
     local subcommands="install remove search update download local list init"
-    local opts="-c --config -v --verbose -S --install -R --remove -Q --local -Qs -Ss -Sl -Su -Sd --init --list -i --isolated -r --rootdir -u --update -s --search -d --download -l --library -y --noconfirm -n --name --arch --max-microarch --api-level --api --api-level-exact --api-exact"
+    local opts="-c --config -v --verbose -S --install -R --remove -Q --local -Qs -Ss -Sl -Su -Sd --init --list -i --isolated -r --rootdir -u --update -s --search -d --download -l --library -y --noconfirm -n --name --arch --max-microarch --api-level --api --api-level-exact --api-exact --disable-skip-abis --skip-abi-level --skip-abi-custom"
 
     local prev_opt="$prev"
     case "$prev_opt" in
@@ -85,6 +85,16 @@ _apexm() {
             ;;
         --api-level|--api|--api-level-exact|--api-exact)
             COMPREPLY=( $(compgen -W "29 30 31 32 33 34 35" -- "$cur") )
+            return
+            ;;
+        --skip-abi-level)
+            COMPREPLY=( $(compgen -W "0 1 2 3" -- "$cur") )
+            return
+            ;;
+        --skip-abi-custom)
+            if declare -f _filedir >/dev/null 2>&1; then
+                _filedir
+            fi
             return
             ;;
     esac
