@@ -14,6 +14,8 @@ type PackageCandidate struct {
 }
 
 type RegistryCache struct {
-	Providers map[string][]string // libName -> list of package names
-	Packages  []*PackageCandidate // all packages in this repo
+	Providers    map[string][]string // libName / capability / alias -> list of package names
+	ShortAliases map[string][]string // shortName -> list of package names
+	Packages     []*PackageCandidate // all packages in this repo
 }
+

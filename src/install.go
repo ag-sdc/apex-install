@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -277,7 +278,7 @@ func installLocalApex(pkgName, targetDir string) error {
 	return nil
 }
 
-func linkContents(srcDir, destDir string) {
+func linkContentsTracked(srcDir, destDir string, manifest *[]string) {
 	if stat, err := os.Stat(srcDir); err != nil || !stat.IsDir() {
 		return
 	}
@@ -288,12 +289,18 @@ func linkContents(srcDir, destDir string) {
 		destPath := filepath.Join(destDir, entry.Name())
 
 		if entry.IsDir() {
-			linkContents(srcPath, destPath)
+			linkContentsTracked(srcPath, destPath, manifest)
 		} else {
 			os.Remove(destPath)
-			os.Symlink(srcPath, destPath)
+			if err := os.Symlink(srcPath, destPath); err == nil && manifest != nil {
+				*manifest = append(*manifest, destPath)
+			}
 		}
 	}
+}
+
+func linkContents(srcDir, destDir string) {
+	linkContentsTracked(srcDir, destDir, nil)
 }
 
 func unlinkContents(srcDir, destDir string) {
@@ -322,17 +329,40 @@ func uninstallApex(pkgName string) error {
 	mountPoint := filepath.Join(ActiveConfig.InstallPath, pkgName)
 	mergePoint := ActiveConfig.MergePath
 
+	// 1. Surgical unlinking using manifest if present
+	manifestPath := filepath.Join(ActiveConfig.InstallPath, ".installed", pkgName+".manifest")
+	if f, err := os.Open(manifestPath); err == nil {
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			destPath := strings.TrimSpace(scanner.Text())
+			if destPath == "" {
+				continue
+			}
+			if target, err := os.Readlink(destPath); err == nil && strings.HasPrefix(target, mountPoint) {
+				os.Remove(destPath)
+			}
+		}
+		f.Close()
+		os.Remove(manifestPath)
+	}
+
+	// 2. Fallback standard unlinks
 	includesSrc := filepath.Join(mountPoint, "includes")
 	if _, err := os.Stat(includesSrc); os.IsNotExist(err) {
 		includesSrc = filepath.Join(mountPoint, "include") // Fallback
 	}
 	unlinkContents(includesSrc, filepath.Join(mergePoint, "include"))
 	unlinkContents(filepath.Join(mountPoint, "lib"), filepath.Join(mergePoint, "lib"))
-	
+	unlinkContents(filepath.Join(mountPoint, "lib64"), filepath.Join(mergePoint, "lib64"))
+	unlinkContents(filepath.Join(mountPoint, "lib64"), filepath.Join(mergePoint, "lib"))
+
 	pkgConfigDash := filepath.Join(mountPoint, "lib", "pkg-config")
 	if stat, err := os.Stat(pkgConfigDash); err == nil && stat.IsDir() {
 		unlinkContents(pkgConfigDash, filepath.Join(mergePoint, "lib", "pkgconfig"))
 	}
+	unlinkContents(filepath.Join(mountPoint, "lib", "pkgconfig"), filepath.Join(mergePoint, "lib", "pkgconfig"))
+	unlinkContents(filepath.Join(mountPoint, "lib64", "pkgconfig"), filepath.Join(mergePoint, "lib", "pkgconfig"))
+	unlinkContents(filepath.Join(mountPoint, "share", "pkgconfig"), filepath.Join(mergePoint, "share", "pkgconfig"))
 	unlinkContents(filepath.Join(mountPoint, "bin"), filepath.Join(mergePoint, "bin"))
 	unlinkContents(filepath.Join(mountPoint, "share"), filepath.Join(mergePoint, "share"))
 
@@ -360,22 +390,87 @@ func uninstallApex(pkgName string) error {
 func createSymlinks(pkgName string) {
 	mountPoint := filepath.Join(ActiveConfig.InstallPath, pkgName)
 	mergePoint := ActiveConfig.MergePath
+	var manifest []string
 
+	// 1. Headers
 	includesSrc := filepath.Join(mountPoint, "includes")
 	if _, err := os.Stat(includesSrc); os.IsNotExist(err) {
 		includesSrc = filepath.Join(mountPoint, "include") // Fallback
 	}
-	linkContents(includesSrc, filepath.Join(mergePoint, "include"))
+	linkContentsTracked(includesSrc, filepath.Join(mergePoint, "include"), &manifest)
 
-	linkContents(filepath.Join(mountPoint, "lib"), filepath.Join(mergePoint, "lib"))
-
-	pkgConfigDash := filepath.Join(mountPoint, "lib", "pkg-config")
-	if stat, err := os.Stat(pkgConfigDash); err == nil && stat.IsDir() {
-		linkContents(pkgConfigDash, filepath.Join(mergePoint, "lib", "pkgconfig"))
+	// 2. Lib & Lib64
+	linkContentsTracked(filepath.Join(mountPoint, "lib"), filepath.Join(mergePoint, "lib"), &manifest)
+	if _, err := os.Stat(filepath.Join(mountPoint, "lib64")); err == nil {
+		linkContentsTracked(filepath.Join(mountPoint, "lib64"), filepath.Join(mergePoint, "lib64"), &manifest)
+		linkContentsTracked(filepath.Join(mountPoint, "lib64"), filepath.Join(mergePoint, "lib"), &manifest)
 	}
 
-	linkContents(filepath.Join(mountPoint, "bin"), filepath.Join(mergePoint, "bin"))
-	linkContents(filepath.Join(mountPoint, "share"), filepath.Join(mergePoint, "share"))
+	// 3. Centralized Pkg-Config Pool
+	pkgConfigDirs := []struct {
+		src  string
+		dest string
+	}{
+		{filepath.Join(mountPoint, "lib", "pkgconfig"), filepath.Join(mergePoint, "lib", "pkgconfig")},
+		{filepath.Join(mountPoint, "lib64", "pkgconfig"), filepath.Join(mergePoint, "lib", "pkgconfig")},
+		{filepath.Join(mountPoint, "lib", "pkg-config"), filepath.Join(mergePoint, "lib", "pkgconfig")},
+		{filepath.Join(mountPoint, "share", "pkgconfig"), filepath.Join(mergePoint, "share", "pkgconfig")},
+	}
+	for _, pc := range pkgConfigDirs {
+		if stat, err := os.Stat(pc.src); err == nil && stat.IsDir() {
+			linkContentsTracked(pc.src, pc.dest, &manifest)
+		}
+	}
+
+	// 4. Bin & Share
+	linkContentsTracked(filepath.Join(mountPoint, "bin"), filepath.Join(mergePoint, "bin"), &manifest)
+	linkContentsTracked(filepath.Join(mountPoint, "share"), filepath.Join(mergePoint, "share"), &manifest)
+
+	// 5. Dynamic directory walking for other top-level directories
+	if entries, err := os.ReadDir(mountPoint); err == nil {
+		skipDirs := map[string]bool{
+			"bin": true, "lib": true, "lib64": true, "include": true, "includes": true, "share": true,
+			"lost+found": true, "apex_manifest.json": true, "apex_manifest.pb": true,
+			"apex_pubkey": true, "apex_build_info.pb": true, "AndroidManifest.xml": true,
+		}
+		for _, entry := range entries {
+			if skipDirs[entry.Name()] {
+				continue
+			}
+			srcEntry := filepath.Join(mountPoint, entry.Name())
+			destEntry := filepath.Join(mergePoint, entry.Name())
+
+			if entry.IsDir() {
+				if entry.Name() == "opt" {
+					// Atomic directory link for opt subtrees
+					if optEntries, err := os.ReadDir(srcEntry); err == nil {
+						os.MkdirAll(destEntry, 0755)
+						for _, optTool := range optEntries {
+							toolSrc := filepath.Join(srcEntry, optTool.Name())
+							toolDest := filepath.Join(destEntry, optTool.Name())
+							os.Remove(toolDest)
+							if err := os.Symlink(toolSrc, toolDest); err == nil {
+								manifest = append(manifest, toolDest)
+							}
+						}
+					}
+				} else {
+					linkContentsTracked(srcEntry, destEntry, &manifest)
+				}
+			}
+		}
+	}
+
+	// Save install manifest
+	metaDir := filepath.Join(ActiveConfig.InstallPath, ".installed")
+	os.MkdirAll(metaDir, 0755)
+	manifestPath := filepath.Join(metaDir, pkgName+".manifest")
+	if f, err := os.Create(manifestPath); err == nil {
+		for _, link := range manifest {
+			f.WriteString(link + "\n")
+		}
+		f.Close()
+	}
 }
 
 func isWritable(path string) bool {

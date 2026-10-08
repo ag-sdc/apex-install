@@ -59,12 +59,12 @@ func isValFlag(arg string) bool {
 }
 
 func isOpFlag(arg string) bool {
-	if arg == "--install" || arg == "--remove" || arg == "--local" || arg == "--init" || arg == "--list" {
+	if arg == "--install" || arg == "--remove" || arg == "--local" || arg == "--init" || arg == "--list" || arg == "--files" {
 		return true
 	}
 	if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
 		for _, r := range arg[1:] {
-			if r == 'S' || r == 'R' || r == 'Q' {
+			if r == 'S' || r == 'R' || r == 'Q' || r == 'F' {
 				return true
 			}
 		}
@@ -96,7 +96,7 @@ func preProcessArgs() {
 				continue
 			}
 			switch arg {
-			case "search", "install", "remove", "init", "update", "download", "local", "list":
+			case "search", "install", "remove", "init", "update", "download", "local", "list", "files":
 				subcmdIdx = i
 			}
 			break
@@ -172,6 +172,9 @@ func preProcessArgs() {
 				tail := append([]string{}, os.Args[subcmdIdx+1:]...)
 				prefix := append([]string{}, os.Args[:subcmdIdx]...)
 				os.Args = append(append(prefix, "-S", "-d"), tail...)
+				return
+			case "files":
+				os.Args[subcmdIdx] = "-F"
 				return
 			}
 		}
@@ -580,6 +583,28 @@ func handleLocalSearch(targets []string, nameOnly, libOnly bool, rootInstall, ro
 				}
 			}
 		}
+		if pkg.version == "" {
+			pbPaths := []string{
+				filepath.Join(pkg.installDir, "apex_manifest.pb"),
+			}
+			for _, mpb := range pbPaths {
+				if data, err := os.ReadFile(mpb); err == nil {
+					_, vCode, vName := parseApexManifestPb(data)
+					if vName != "" {
+						pkg.version = vName
+					}
+					if vCode != "" {
+						pkg.versionCode = vCode
+						if pkg.version == "" {
+							pkg.version = vCode
+						}
+					}
+					if pkg.version != "" {
+						break
+					}
+				}
+			}
+		}
 	}
 
 	// 3. Collect version and package type from download paths (fallback / enrich)
@@ -892,6 +917,7 @@ Operations:
   install, -Sl        Install packages (by library name)
   remove,  -R         Remove packages
   search,  -Ss        Search for packages in repositories
+  files,   -F         Query the file database (<repo>.files.zst) for packages owning files
   update,  -Su        Sync/update repository databases
   download,-Sd        Download packages without installing
   local,   -Q         Query locally installed packages for a library
@@ -909,6 +935,57 @@ Options:
 	pflag.PrintDefaults()
 }
 
+func parseApexManifestPb(data []byte) (name string, versionCode string, versionName string) {
+	idx := 0
+	for idx < len(data) {
+		tag := data[idx]
+		idx++
+		fieldNum := tag >> 3
+		wireType := tag & 0x07
+		switch wireType {
+		case 0: // varint
+			var val uint64
+			var shift uint
+			for idx < len(data) {
+				b := data[idx]
+				idx++
+				val |= uint64(b&0x7F) << shift
+				if b&0x80 == 0 {
+					break
+				}
+				shift += 7
+			}
+			if fieldNum == 2 {
+				versionCode = strconv.FormatUint(val, 10)
+			}
+		case 2: // length-delimited string
+			var length int
+			var shift uint
+			for idx < len(data) {
+				b := data[idx]
+				idx++
+				length |= int(b&0x7F) << shift
+				if b&0x80 == 0 {
+					break
+				}
+				shift += 7
+			}
+			if idx+length <= len(data) {
+				strVal := string(data[idx : idx+length])
+				idx += length
+				if fieldNum == 1 {
+					name = strVal
+				} else if fieldNum == 3 {
+					versionName = strVal
+				}
+			}
+		default:
+			return
+		}
+	}
+	return
+}
+
 func main() {
 	preProcessArgs()
 
@@ -922,6 +999,7 @@ func main() {
 	localMode := pflag.BoolP("local", "Q", false, "Query installed packages for a library name (use -Qs to search installed packages)")
 	initMode := pflag.Bool("init", false, "Re-mount and symlink all installed APEXes")
 	listMode := pflag.Bool("list", false, "List all installed packages")
+	filesSearchFlag := pflag.BoolP("files", "F", false, "Query the file database (<repo>.files.zst) for packages owning files")
 
 	isolatedFlag := pflag.BoolP("isolated", "i", false, "Isolated mode: ignore system states (user) or operate on rootdir (system)")
 	rootDirFlag := pflag.StringP("rootdir", "r", "", "Root directory for isolated system operations")
@@ -952,6 +1030,7 @@ func main() {
 	if *localMode { modesActive++ }
 	if *initMode { modesActive++ }
 	if *listMode { modesActive++ }
+	if *filesSearchFlag { modesActive++ }
 
 	if modesActive > 1 {
 		fmt.Println("Error: only one operation may be used at a time")
@@ -1098,9 +1177,20 @@ func main() {
 
 	if *updateFlag {
 		doUpdate(repos)
-		if len(targets) == 0 {
+		if len(targets) == 0 && !*filesSearchFlag {
 			os.Exit(0)
 		}
+	}
+
+	if *filesSearchFlag {
+		if len(targets) == 0 {
+			fmt.Println("Error: no file path or pattern specified for -F/--files")
+			os.Exit(1)
+		}
+		for _, t := range targets {
+			searchFiles(t, repos)
+		}
+		os.Exit(0)
 	}
 
 	if !*searchFlag {
@@ -1149,7 +1239,7 @@ func main() {
 
 		var candidates []*PackageCandidate
 
-		useLibLookup := *libFlag || *searchFlag
+		useLibLookup := *libFlag || *searchFlag || strings.Contains(targetName, ":") || strings.HasSuffix(targetName, ".so")
 
 		// Search across all caches
 		for _, cache := range caches {
@@ -1160,20 +1250,49 @@ func main() {
 			var searchPkgs []string
 
 			if useLibLookup {
-				// Library mode: resolve library name to package names via providers
+				// Capability/Library mode: resolve capability/library name to package names via providers
 				searchPkgs = []string{targetName}
-				for _, sp := range searchPkgs {
-					if pkgs, ok := cache.Providers[sp]; ok {
-						searchPkgs = append(searchPkgs, pkgs...)
+				if pkgs, ok := cache.Providers[targetName]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
+				if pkgs, ok := cache.Providers["alias:"+targetName]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
+				if pkgs, ok := cache.ShortAliases[targetName]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
+				if *searchFlag {
+					// Also search inside Providers for keys containing targetName
+					for provKey, provPkgs := range cache.Providers {
+						if strings.Contains(provKey, targetName) {
+							searchPkgs = append(searchPkgs, provPkgs...)
+						}
+					}
+					// Also search package names containing targetName
+					for _, cand := range cache.Packages {
+						if strings.Contains(cand.Name, targetName) {
+							searchPkgs = append(searchPkgs, cand.Name)
+						}
 					}
 				}
 			} else {
-				// Package mode: target is a package name directly
+				// Package mode: target is a package name directly, but also check aliases
 				searchPkgs = []string{targetName}
+				if pkgs, ok := cache.Providers["alias:"+targetName]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
+				if pkgs, ok := cache.ShortAliases[targetName]; ok {
+					searchPkgs = append(searchPkgs, pkgs...)
+				}
 			}
 
 			// Find packages matching the search names
+			seenSearch := make(map[string]bool)
 			for _, pkgName := range searchPkgs {
+				if seenSearch[pkgName] {
+					continue
+				}
+				seenSearch[pkgName] = true
 				for _, cand := range cache.Packages {
 					if cand.Name == pkgName {
 						if *maxMicroarch != "" && parseMicroArch(cand.MicroArch) > parseMicroArch(*maxMicroarch) {
@@ -1222,30 +1341,27 @@ func main() {
 			continue // do not add to installList and don't resolve dependencies
 		}
 
-		// When using -l with multiple providers, show a picker
-		if *libFlag {
-			// Collect unique provider package names
-			providerSet := make(map[string]bool)
-			var providerNames []string
-			for _, c := range candidates {
-				if !providerSet[c.Name] {
-					providerSet[c.Name] = true
-					providerNames = append(providerNames, c.Name)
-				}
+		// When multiple packages provide the target, show an interactive picker
+		providerSet := make(map[string]bool)
+		var providerNames []string
+		for _, c := range candidates {
+			if !providerSet[c.Name] {
+				providerSet[c.Name] = true
+				providerNames = append(providerNames, c.Name)
 			}
+		}
 
-			if len(providerNames) > 1 {
-				chosen := pickProvider(targetName, providerNames, repos, caches)
-				// Filter candidates to only the chosen package
-				var filtered []*PackageCandidate
-				for _, c := range candidates {
-					if c.Name == chosen {
-						filtered = append(filtered, c)
-					}
+		if len(providerNames) > 1 {
+			chosen := pickProvider(targetName, providerNames, repos, caches)
+			// Filter candidates to only the chosen package
+			var filtered []*PackageCandidate
+			for _, c := range candidates {
+				if c.Name == chosen {
+					filtered = append(filtered, c)
 				}
-				candidates = filtered
-				sortCandidates(candidates, *maxMicroarch)
 			}
+			candidates = filtered
+			sortCandidates(candidates, *maxMicroarch)
 		}
 
 		selected := candidates[0]

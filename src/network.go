@@ -11,6 +11,23 @@ import (
 )
 
 func doReq(cfg *RepoConfig, urlStr string) (*http.Response, error) {
+	if strings.HasPrefix(urlStr, "file://") || strings.HasPrefix(urlStr, "/") {
+		filePath := strings.TrimPrefix(urlStr, "file://")
+		f, err := os.Open(filePath)
+		if err != nil {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Status:     "404 Not Found",
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       f,
+		}, nil
+	}
+
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return nil, err
