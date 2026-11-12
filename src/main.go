@@ -266,55 +266,445 @@ func handleInit() {
 	}
 }
 
-func handleLocal(libName string, nameOnly bool) {
-	entries, err := os.ReadDir(ActiveConfig.InstallPath)
-	if err != nil {
-		if !nameOnly {
-			fmt.Printf("Failed to read install path: %v\n", err)
+type localQueryOptions struct {
+	installPaths []string
+	mergePaths   []string
+	dbCacheDirs  []string
+}
+
+type installedDirEntry struct {
+	pkgName string
+	dir     string
+}
+
+func appendUniqueExpandedPath(list *[]string, seen map[string]bool, raw string) {
+	if raw == "" {
+		return
+	}
+	p := filepath.Clean(expandTilde(raw))
+	if !seen[p] {
+		seen[p] = true
+		*list = append(*list, p)
+	}
+}
+
+func collectLocalQueryOptions(apexConfig *ApexConfig, isRoot, isolated bool, rootDir string) localQueryOptions {
+	var opts localQueryOptions
+	seenInstall := make(map[string]bool)
+	seenMerge := make(map[string]bool)
+	seenCache := make(map[string]bool)
+
+	if envSearch := os.Getenv("APEX_SEARCH_PATH"); envSearch != "" {
+		for _, p := range filepath.SplitList(envSearch) {
+			appendUniqueExpandedPath(&opts.installPaths, seenInstall, p)
+			appendUniqueExpandedPath(&opts.mergePaths, seenMerge, p)
 		}
-		os.Exit(1)
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	if rootDir != "" {
+		appendUniqueExpandedPath(&opts.installPaths, seenInstall, filepath.Join(rootDir, "apex"))
+		appendUniqueExpandedPath(&opts.mergePaths, seenMerge, filepath.Join(rootDir, "apex"))
+		appendUniqueExpandedPath(&opts.dbCacheDirs, seenCache, filepath.Join(rootDir, "var", "cache", "apex", "sync"))
+	}
+
+	appendUniqueExpandedPath(&opts.installPaths, seenInstall, ActiveConfig.InstallPath)
+	appendUniqueExpandedPath(&opts.mergePaths, seenMerge, ActiveConfig.MergePath)
+	appendUniqueExpandedPath(&opts.dbCacheDirs, seenCache, ActiveConfig.DBCacheDir)
+
+	if !isRoot && !isolated && apexConfig != nil {
+		appendUniqueExpandedPath(&opts.installPaths, seenInstall, apexConfig.Root.InstallPath)
+		appendUniqueExpandedPath(&opts.mergePaths, seenMerge, apexConfig.Root.MergePath)
+		appendUniqueExpandedPath(&opts.dbCacheDirs, seenCache, apexConfig.Root.DBCacheDir)
+	}
+
+	return opts
+}
+
+func isMergedSystemSubdir(name string) bool {
+	switch name {
+	case "lib", "lib64", "libx32", "bin", "sbin", "share", "include", "etc", "usr", "var", "opt":
+		return true
+	}
+	return false
+}
+
+func hasApexManifest(pkgDir string) bool {
+	for _, name := range []string{"apex_manifest.json", "apex_manifest.pb", ".APEXINFO"} {
+		if _, err := os.Stat(filepath.Join(pkgDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func listInstalledPackageDirs(installPaths []string) []installedDirEntry {
+	var result []installedDirEntry
+	seen := make(map[string]bool)
+
+	for _, root := range installPaths {
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			continue
 		}
-		pkgName := entry.Name()
-		for _, libDir := range []string{"lib", "lib64"} {
-			libPath := filepath.Join(ActiveConfig.InstallPath, pkgName, libDir)
-			libs, err := os.ReadDir(libPath)
+		for _, entry := range entries {
+			pkgName := entry.Name()
+			if strings.HasPrefix(pkgName, ".") || seen[pkgName] {
+				continue
+			}
+			pkgDir := filepath.Join(root, pkgName)
+			info, err := os.Stat(pkgDir)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if isMergedSystemSubdir(pkgName) && !hasApexManifest(pkgDir) {
+				continue
+			}
+			sub, err := os.ReadDir(pkgDir)
+			if err != nil || len(sub) == 0 {
+				continue
+			}
+			seen[pkgName] = true
+			result = append(result, installedDirEntry{
+				pkgName: pkgName,
+				dir:     pkgDir,
+			})
+		}
+	}
+
+	return result
+}
+
+func stripLocalVersionConstraint(target string) string {
+	if idx := strings.IndexAny(target, "><="); idx >= 0 {
+		target = target[:idx]
+	}
+	if idx := strings.LastIndex(target, "@"); idx > 0 {
+		target = target[:idx]
+	}
+	return strings.TrimSpace(target)
+}
+
+func fileExistsRegular(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func findRelativeFile(baseDir string, candidates []string) (string, bool) {
+	for _, rel := range candidates {
+		p := filepath.Join(baseDir, rel)
+		if fileExistsRegular(p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+func walkFindFirst(rootDir string, maxDepth int, match func(path string, d os.DirEntry) bool) (string, bool) {
+	if _, err := os.Stat(rootDir); err != nil {
+		return "", false
+	}
+	baseDepth := strings.Count(filepath.Clean(rootDir), string(os.PathSeparator))
+	var found string
+	stopErr := fmt.Errorf("found")
+	_ = filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil {
+			return nil
+		}
+		if path != rootDir {
+			depth := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - baseDepth
+			if d.IsDir() && maxDepth > 0 && depth > maxDepth {
+				return filepath.SkipDir
+			}
+		}
+		if match(path, d) {
+			found = path
+			return stopErr
+		}
+		return nil
+	})
+	return found, found != ""
+}
+
+func matchPythonSitePackages(pkgDir, pyVer, mod string) (string, bool) {
+	for _, base := range []string{"lib", "lib64", "libx32", "share"} {
+		spDir := filepath.Join(pkgDir, base, "python"+pyVer, "site-packages")
+		entries, err := os.ReadDir(spDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			switch {
+			case name == mod+".py" && !e.IsDir():
+				return filepath.Join(spDir, name), true
+			case name == mod && e.IsDir():
+				return filepath.Join(spDir, name), true
+			case (strings.HasSuffix(name, ".dist-info") || strings.HasSuffix(name, ".egg-info")) &&
+				(strings.HasPrefix(name, mod+"-") || strings.HasPrefix(name, mod+".")):
+				return filepath.Join(spDir, name), true
+			}
+		}
+	}
+	return "", false
+}
+
+func matchInstalledSoname(pkgDir, target string, substring bool) (string, bool) {
+	libSubdirs := []string{"lib64", "libx32", "lib", filepath.Join("lib64", "bionic"), filepath.Join("lib", "bionic")}
+	for _, libDir := range libSubdirs {
+		dirPath := filepath.Join(pkgDir, libDir)
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if (!substring && name == target) || (substring && strings.Contains(name, target)) {
+				return filepath.Join(dirPath, name), true
+			}
+		}
+	}
+	return "", false
+}
+
+func matchInstalledCapability(pkg installedDirEntry, tag, val string) (string, bool) {
+	switch tag {
+	case "pc":
+		targetFile := val + ".pc"
+		if p, ok := findRelativeFile(pkg.dir, []string{
+			filepath.Join("lib64", "pkgconfig", targetFile),
+			filepath.Join("libx32", "pkgconfig", targetFile),
+			filepath.Join("lib", "pkgconfig", targetFile),
+			filepath.Join("lib", "pkg-config", targetFile),
+			filepath.Join("share", "pkgconfig", targetFile),
+		}); ok {
+			return p, true
+		}
+		return walkFindFirst(pkg.dir, 4, func(_ string, d os.DirEntry) bool {
+			return !d.IsDir() && d.Name() == targetFile
+		})
+	case "cmake":
+		names := []string{val + "Config.cmake", val + "-config.cmake"}
+		for _, base := range []string{"lib64", "libx32", "lib", "share"} {
+			for _, sub := range []string{
+				filepath.Join(pkg.dir, base, "cmake", val),
+				filepath.Join(pkg.dir, base, "cmake", strings.ToLower(val)),
+				filepath.Join(pkg.dir, base, "cmake"),
+			} {
+				if p, ok := findRelativeFile(sub, names); ok {
+					return p, true
+				}
+			}
+		}
+		return walkFindFirst(pkg.dir, 5, func(_ string, d os.DirEntry) bool {
+			if d.IsDir() {
+				return false
+			}
+			return d.Name() == names[0] || d.Name() == names[1]
+		})
+	case "bin":
+		p := filepath.Join(pkg.dir, "bin", val)
+		if fileExistsRegular(p) {
+			return p, true
+		}
+	case "header":
+		if p, ok := findRelativeFile(filepath.Join(pkg.dir, "include"), []string{val, val + ".h", val + ".hpp"}); ok {
+			return p, true
+		}
+		if pkg.pkgName == val || deriveShortAlias(pkg.pkgName) == val {
+			if _, ok := walkFindFirst(filepath.Join(pkg.dir, "include"), 4, func(_ string, d os.DirEntry) bool {
+				return !d.IsDir() && (strings.HasSuffix(d.Name(), ".h") || strings.HasSuffix(d.Name(), ".hpp"))
+			}); ok {
+				return filepath.Join(pkg.dir, "include"), true
+			}
+		}
+	case "jar":
+		return findRelativeFile(pkg.dir, []string{
+			filepath.Join("share", "java", val+".jar"),
+			filepath.Join("javalib", val+".jar"),
+		})
+	case "apk":
+		for _, sub := range []string{"app", "priv-app"} {
+			if p, ok := walkFindFirst(filepath.Join(pkg.dir, sub), 3, func(_ string, d os.DirEntry) bool {
+				return !d.IsDir() && d.Name() == val+".apk"
+			}); ok {
+				return p, true
+			}
+		}
+	case "font":
+		for _, sub := range []string{"fonts", filepath.Join("etc", "fonts"), filepath.Join("share", "fonts")} {
+			if p, ok := walkFindFirst(filepath.Join(pkg.dir, sub), 4, func(_ string, d os.DirEntry) bool {
+				return !d.IsDir() && (d.Name() == val+".ttf" || d.Name() == val+".otf")
+			}); ok {
+				return p, true
+			}
+		}
+	case "completion":
+		for _, sub := range []string{filepath.Join("share", "bash-completion"), filepath.Join("share", "zsh"), filepath.Join("share", "fish")} {
+			if p, ok := walkFindFirst(filepath.Join(pkg.dir, sub), 4, func(_ string, d os.DirEntry) bool {
+				return !d.IsDir() && d.Name() == val
+			}); ok {
+				return p, true
+			}
+		}
+	case "alias":
+		if pkg.pkgName == val || deriveShortAlias(pkg.pkgName) == val {
+			return pkg.dir, true
+		}
+	default:
+		if strings.HasPrefix(tag, "py") {
+			pyVer := strings.TrimPrefix(tag, "py")
+			return matchPythonSitePackages(pkg.dir, pyVer, val)
+		}
+		if strings.HasSuffix(val, ".so") || strings.Contains(val, ".so.") {
+			return matchInstalledSoname(pkg.dir, val, false)
+		}
+	}
+	return "", false
+}
+
+func matchMergedPkgConfig(pcName string, mergePaths []string, installed []installedDirEntry) (string, string, bool) {
+	targetFile := pcName + ".pc"
+	relPaths := []string{
+		filepath.Join("lib64", "pkgconfig", targetFile),
+		filepath.Join("libx32", "pkgconfig", targetFile),
+		filepath.Join("lib", "pkgconfig", targetFile),
+		filepath.Join("lib", "pkg-config", targetFile),
+		filepath.Join("share", "pkgconfig", targetFile),
+	}
+	for _, mp := range mergePaths {
+		if p, ok := findRelativeFile(mp, relPaths); ok {
+			resolved, err := filepath.EvalSymlinks(p)
 			if err != nil {
 				continue
 			}
-			for _, lib := range libs {
-				if strings.Contains(lib.Name(), libName) {
-					if nameOnly {
-						fmt.Println(pkgName)
-					} else {
-						fmt.Printf("Found in: %s (at %s)\n", pkgName, filepath.Join(libPath, lib.Name()))
-					}
-					os.Exit(0)
+			for _, pkg := range installed {
+				cleanDir := filepath.Clean(pkg.dir)
+				if resolved == cleanDir || strings.HasPrefix(resolved, cleanDir+string(os.PathSeparator)) {
+					return pkg.pkgName, p, true
 				}
 			}
 		}
 	}
-	os.Exit(1)
+	return "", "", false
 }
 
-func handleList() {
-	entries, err := os.ReadDir(ActiveConfig.InstallPath)
-	if err != nil {
-		fmt.Printf("No packages installed (cannot read %s)\n", ActiveConfig.InstallPath)
-		return
-	}
-	count := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			fmt.Println(entry.Name())
-			count++
+func lookupInstalledViaProviders(query string, installedMap map[string]string, dbCacheDirs []string) (string, string, bool) {
+	for _, cacheDir := range dbCacheDirs {
+		provFiles, err := filepath.Glob(filepath.Join(cacheDir, "*.providers"))
+		if err != nil {
+			continue
+		}
+		sort.Strings(provFiles)
+		for _, pf := range provFiles {
+			f, err := os.Open(pf)
+			if err != nil {
+				continue
+			}
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				parts := strings.Fields(strings.TrimSpace(scanner.Text()))
+				if len(parts) < 6 {
+					continue
+				}
+				if parts[0] == query {
+					pkgName := parts[4]
+					if _, isInstalled := installedMap[pkgName]; isInstalled {
+						f.Close()
+						return pkgName, pf, true
+					}
+				}
+			}
+			f.Close()
 		}
 	}
-	if count == 0 {
+	return "", "", false
+}
+
+func resolveLocalTarget(rawTarget string, opts localQueryOptions) (string, string, bool) {
+	target := stripLocalVersionConstraint(rawTarget)
+	if target == "" {
+		return "", "", false
+	}
+
+	installed := listInstalledPackageDirs(opts.installPaths)
+	if len(installed) == 0 {
+		return "", "", false
+	}
+
+	installedMap := make(map[string]string, len(installed))
+	for _, pkg := range installed {
+		installedMap[pkg.pkgName] = pkg.dir
+	}
+
+	if idx := strings.Index(target, ":"); idx > 0 {
+		tag, val := target[:idx], target[idx+1:]
+		for _, pkg := range installed {
+			if loc, ok := matchInstalledCapability(pkg, tag, val); ok {
+				return pkg.pkgName, loc, true
+			}
+		}
+		if tag == "pc" {
+			if pkgName, loc, ok := matchMergedPkgConfig(val, opts.mergePaths, installed); ok {
+				return pkgName, loc, true
+			}
+		}
+		if pkgName, loc, ok := lookupInstalledViaProviders(target, installedMap, opts.dbCacheDirs); ok {
+			return pkgName, loc, true
+		}
+		return "", "", false
+	}
+
+	if dir, ok := installedMap[target]; ok {
+		return target, dir, true
+	}
+
+	for _, pkg := range installed {
+		if loc, ok := matchInstalledSoname(pkg.dir, target, false); ok {
+			return pkg.pkgName, loc, true
+		}
+	}
+
+	for _, pkg := range installed {
+		if deriveShortAlias(pkg.pkgName) == target {
+			return pkg.pkgName, pkg.dir, true
+		}
+	}
+
+	if pkgName, loc, ok := lookupInstalledViaProviders(target, installedMap, opts.dbCacheDirs); ok {
+		return pkgName, loc, true
+	}
+
+	for _, pkg := range installed {
+		if loc, ok := matchInstalledSoname(pkg.dir, target, true); ok {
+			return pkg.pkgName, loc, true
+		}
+	}
+
+	return "", "", false
+}
+
+func handleLocal(libName string, nameOnly bool, opts localQueryOptions) {
+	pkgName, loc, ok := resolveLocalTarget(libName, opts)
+	if !ok {
+		os.Exit(1)
+	}
+	if nameOnly {
+		fmt.Println(pkgName)
+	} else {
+		fmt.Printf("Found in: %s (at %s)\n", pkgName, loc)
+	}
+	os.Exit(0)
+}
+
+func handleList(opts localQueryOptions) {
+	pkgs := listInstalledPackageDirs(opts.installPaths)
+	for _, pkg := range pkgs {
+		fmt.Println(pkg.pkgName)
+	}
+	if len(pkgs) == 0 {
 		fmt.Println("No packages installed.")
 	}
 }
@@ -463,50 +853,27 @@ func formatLocalPackage(pkg *installedPkgInfo) string {
 	return fmt.Sprintf("local/%s%s", pkg.name, detailsStr)
 }
 
-func handleLocalSearch(targets []string, nameOnly, libOnly bool, rootInstall, rootDownload, rootCache string, apiLevelExact, apiLevel int) {
-	installPaths := []string{ActiveConfig.InstallPath}
-	if rootInstall != "" && expandTilde(rootInstall) != ActiveConfig.InstallPath {
-		if _, err := os.Stat(expandTilde(rootInstall)); err == nil {
-			installPaths = append(installPaths, expandTilde(rootInstall))
-		}
-	}
+func handleLocalSearch(targets []string, nameOnly, libOnly bool, opts localQueryOptions, rootDownload string, apiLevelExact, apiLevel int) {
+	installPaths := opts.installPaths
 	downloadPaths := []string{ActiveConfig.DownloadPath}
 	if rootDownload != "" && expandTilde(rootDownload) != ActiveConfig.DownloadPath {
 		if _, err := os.Stat(expandTilde(rootDownload)); err == nil {
 			downloadPaths = append(downloadPaths, expandTilde(rootDownload))
 		}
 	}
-	dbCacheDirs := []string{ActiveConfig.DBCacheDir}
-	if rootCache != "" && expandTilde(rootCache) != ActiveConfig.DBCacheDir {
-		if _, err := os.Stat(expandTilde(rootCache)); err == nil {
-			dbCacheDirs = append(dbCacheDirs, expandTilde(rootCache))
-		}
-	}
+	dbCacheDirs := opts.dbCacheDirs
 
 	installedMap := make(map[string]*installedPkgInfo)
 	var pkgNames []string
 
-	for _, iPath := range installPaths {
-		entries, err := os.ReadDir(iPath)
-		if err != nil {
-			continue
+	for _, entry := range listInstalledPackageDirs(installPaths) {
+		info := &installedPkgInfo{
+			name:       entry.pkgName,
+			installDir: entry.dir,
+			pkgType:    "apex",
 		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			pkgName := entry.Name()
-			if _, exists := installedMap[pkgName]; exists {
-				continue
-			}
-			info := &installedPkgInfo{
-				name:       pkgName,
-				installDir: filepath.Join(iPath, pkgName),
-				pkgType:    "apex",
-			}
-			installedMap[pkgName] = info
-			pkgNames = append(pkgNames, pkgName)
-		}
+		installedMap[entry.pkgName] = info
+		pkgNames = append(pkgNames, entry.pkgName)
 	}
 
 	if len(pkgNames) == 0 {
@@ -1114,21 +1481,19 @@ func main() {
 	}
 
 	if *listMode {
-		handleList()
+		localOpts := collectLocalQueryOptions(apexConfig, isRoot, *isolatedFlag, *rootDirFlag)
+		handleList(localOpts)
 		os.Exit(0)
 	}
 
 	if *localMode {
+		localOpts := collectLocalQueryOptions(apexConfig, isRoot, *isolatedFlag, *rootDirFlag)
 		if *searchFlag {
-			rootInstall := ""
 			rootDownload := ""
-			rootCache := ""
 			if !isRoot && !*isolatedFlag {
-				rootInstall = apexConfig.Root.InstallPath
 				rootDownload = apexConfig.Root.DownloadPath
-				rootCache = apexConfig.Root.DBCacheDir
 			}
-			handleLocalSearch(targets, *nameFlag, *libFlag, rootInstall, rootDownload, rootCache, *apiLevelExact, *apiLevel)
+			handleLocalSearch(targets, *nameFlag, *libFlag, localOpts, rootDownload, *apiLevelExact, *apiLevel)
 			os.Exit(0)
 		}
 
@@ -1136,7 +1501,7 @@ func main() {
 			fmt.Println("Error: no library name specified for local query")
 			os.Exit(1)
 		}
-		handleLocal(targets[0], *nameFlag)
+		handleLocal(targets[0], *nameFlag, localOpts)
 	}
 
 	if *removeMode {
