@@ -8,7 +8,7 @@ if not sysconfdir.startswith('/')
 endif
 
 exe = custom_target('apexm',
-  input: ['src/main.go', 'src/config.go', 'src/types.go', 'src/network.go', 'src/database.go', 'src/resolve.go', 'src/install.go', 'src/skip_abi.go'],
+  input: ['src/main.go', 'src/config.go', 'src/types.go', 'src/network.go', 'src/database.go', 'src/resolve.go', 'src/install.go', 'src/skip_abi.go', 'src/ui.go'],
   output: 'apexm',
   command: [go, 'build', '-ldflags', '-X main.Sysconfdir=' + sysconfdir, '-o', '@OUTPUT@', '@INPUT@'],
   build_by_default: true,

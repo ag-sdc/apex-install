@@ -3,12 +3,15 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -133,7 +136,7 @@ func extractZip(zipFile, targetDir string) error {
 	return nil
 }
 
-func downloadAndExtract(cand *PackageCandidate) error {
+func downloadPackage(cand *PackageCandidate) error {
 	dirMicroArch := strings.ReplaceAll(cand.MicroArch, "_", ".")
 	archSegment := cand.Arch
 	if dirMicroArch != "" {
@@ -176,6 +179,7 @@ func downloadAndExtract(cand *PackageCandidate) error {
 		}
 		defer resp2.Body.Close()
 		resp = resp2
+		ext = fallbackExt
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -192,21 +196,28 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, resp.Body)
+	label := fmt.Sprintf("%s@%s.%s", cand.Name, cand.Version, ext)
+	prog := NewPacmanProgressReader(resp.Body, label, resp.ContentLength)
+	_, err = io.Copy(out, prog)
+	prog.Finish()
 	out.Close()
 	if err != nil {
 		return err
 	}
 
-	if DownloadOnlyMode {
-		LogV("Download-only mode active. Skipping extraction for %s", cand.Name)
-		return nil
-	}
+	return nil
+}
 
-	err = extractZip(tmpFile, targetDir)
-	os.Remove(tmpFile)
-	if err != nil {
-		return err
+func extractAndInstall(cand *PackageCandidate) error {
+	targetDir := filepath.Join(ActiveConfig.DownloadPath, fmt.Sprintf("%s@%s.apex", cand.Name, cand.Version))
+	tmpFile := filepath.Join(targetDir, "pkg.zip")
+
+	if _, err := os.Stat(tmpFile); err == nil {
+		err = extractZip(tmpFile, targetDir)
+		os.Remove(tmpFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	originalApex := filepath.Join(targetDir, "original_apex")
@@ -220,6 +231,17 @@ func downloadAndExtract(cand *PackageCandidate) error {
 	}
 
 	return installLocalApex(cand.Name, targetDir)
+}
+
+func downloadAndExtract(cand *PackageCandidate) error {
+	if err := downloadPackage(cand); err != nil {
+		return err
+	}
+	if DownloadOnlyMode {
+		LogV("Download-only mode active. Skipping extraction for %s", cand.Name)
+		return nil
+	}
+	return extractAndInstall(cand)
 }
 
 func installLocalApex(pkgName, targetDir string) error {
@@ -500,15 +522,249 @@ func doUpdate(repos []*RepoConfig) {
 	if err != nil || !isWritable(syncDir) {
 		os.MkdirAll(syncDir, 0755)
 	}
+	fmt.Println(":: Synchronizing package databases...")
 	for _, repo := range repos {
 		LogV("Updating repo %s...", repo.Name)
-		errProv := tryDownload(repo, syncDir, ".providers", []string{".providers", ".providers.tar.gz"})
-		if errProv != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: %v\n", errProv)
-		}
 		errDb := tryDownload(repo, syncDir, ".db", []string{".db", ".db.tar.gz"})
 		if errDb != nil {
-			fmt.Fprintf(os.Stderr, "  Error: %v\n", errDb)
+			fmt.Fprintf(os.Stderr, "error: failed to retrieve %s.db: %v\n", repo.Name, errDb)
+		}
+		errProv := tryDownload(repo, syncDir, ".providers", []string{".providers", ".providers.tar.gz"})
+		if errProv != nil {
+			LogV("Warning: %s.providers: %v", repo.Name, errProv)
+		}
+	}
+}
+
+type LocalPackageFile struct {
+	FilePath    string
+	Name        string
+	Version     string
+	VersionCode string
+	IsCapex     bool
+}
+
+func inspectLocalPackage(filePath string) (*LocalPackageFile, error) {
+	st, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("could not find or read file: %w", err)
+	}
+	if st.IsDir() {
+		return nil, fmt.Errorf("%s is a directory, expected a package archive", filePath)
+	}
+
+	zr, err := zip.OpenReader(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read zip archive %s: %w", filePath, err)
+	}
+	defer zr.Close()
+
+	isCapex := strings.HasSuffix(filePath, ".capex")
+	var manifestData []byte
+	var manifestIsJson bool
+
+	for _, f := range zr.File {
+		if f.Name == "original_apex" {
+			isCapex = true
+		}
+		if f.Name == "apex_manifest.json" && len(manifestData) == 0 {
+			rc, err := f.Open()
+			if err == nil {
+				manifestData, _ = io.ReadAll(rc)
+				rc.Close()
+				manifestIsJson = true
+			}
+		}
+	}
+
+	if len(manifestData) == 0 {
+		for _, f := range zr.File {
+			if f.Name == "apex_manifest.pb" {
+				rc, err := f.Open()
+				if err == nil {
+					manifestData, _ = io.ReadAll(rc)
+					rc.Close()
+					break
+				}
+			}
+		}
+	}
+
+	// If it's a capex and manifest was not found at root, check inside original_apex
+	if len(manifestData) == 0 && isCapex {
+		for _, f := range zr.File {
+			if f.Name == "original_apex" {
+				rc, err := f.Open()
+				if err == nil {
+					origBytes, _ := io.ReadAll(rc)
+					rc.Close()
+					if origZr, err := zip.NewReader(bytes.NewReader(origBytes), int64(len(origBytes))); err == nil {
+						for _, of := range origZr.File {
+							if of.Name == "apex_manifest.json" {
+								if orc, err := of.Open(); err == nil {
+									manifestData, _ = io.ReadAll(orc)
+									orc.Close()
+									manifestIsJson = true
+									break
+								}
+							}
+						}
+						if len(manifestData) == 0 {
+							for _, of := range origZr.File {
+								if of.Name == "apex_manifest.pb" {
+									if orc, err := of.Open(); err == nil {
+										manifestData, _ = io.ReadAll(orc)
+										orc.Close()
+										break
+									}
+								}
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	var name string
+	var version string
+	var versionCode string
+
+	if len(manifestData) > 0 {
+		if manifestIsJson {
+			var m struct {
+				Name        string `json:"name"`
+				Version     int64  `json:"version"`
+				VersionName string `json:"versionName"`
+			}
+			if err := json.Unmarshal(manifestData, &m); err == nil {
+				name = m.Name
+				if m.VersionName != "" {
+					version = m.VersionName
+				} else if m.Version > 0 {
+					version = strconv.FormatInt(m.Version, 10)
+				}
+				if m.Version > 0 {
+					versionCode = strconv.FormatInt(m.Version, 10)
+				}
+			}
+		} else {
+			pName, vCode, vName := parseApexManifestPb(manifestData)
+			name = pName
+			versionCode = vCode
+			if vName != "" {
+				version = vName
+			} else {
+				version = vCode
+			}
+		}
+	}
+
+	if name == "" {
+		// Fallback to filename
+		base := filepath.Base(filePath)
+		base = strings.TrimSuffix(base, ".apex")
+		base = strings.TrimSuffix(base, ".capex")
+		if idx := strings.Index(base, "-"); idx > 0 {
+			name = base[:idx]
+			version = base[idx+1:]
+		} else if idx := strings.Index(base, "@"); idx > 0 {
+			name = base[:idx]
+			version = base[idx+1:]
+		} else {
+			name = base
+			version = "1.0.0"
+		}
+	}
+
+	if version == "" {
+		version = "1.0.0"
+	}
+
+	return &LocalPackageFile{
+		FilePath:    filePath,
+		Name:        name,
+		Version:     version,
+		VersionCode: versionCode,
+		IsCapex:     isCapex,
+	}, nil
+}
+
+func installLocalPackageFile(pkg *LocalPackageFile) error {
+	mountPoint := filepath.Join(ActiveConfig.InstallPath, pkg.Name)
+	if _, err := os.Stat(mountPoint); err == nil {
+		uninstallApex(pkg.Name)
+	}
+
+	ext := "apex"
+	if pkg.IsCapex {
+		ext = "capex"
+	}
+
+	targetDir := filepath.Join(ActiveConfig.DownloadPath, fmt.Sprintf("%s@%s.%s", pkg.Name, pkg.Version, ext))
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v", targetDir, err)
+	}
+
+	if err := extractZip(pkg.FilePath, targetDir); err != nil {
+		return fmt.Errorf("failed to extract %s: %v", pkg.FilePath, err)
+	}
+
+	originalApex := filepath.Join(targetDir, "original_apex")
+	if _, err := os.Stat(originalApex); err == nil {
+		LogV("Detected CAPEX package, extracting original_apex...")
+		if err := extractZip(originalApex, targetDir); err != nil {
+			return fmt.Errorf("failed to extract original_apex: %v", err)
+		}
+		os.Remove(originalApex)
+	}
+
+	return installLocalApex(pkg.Name, targetDir)
+}
+
+func handleUpgrade(targets []string) {
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no targets specified (use -h for help)")
+		os.Exit(1)
+	}
+
+	var pkgsToInstall []*LocalPackageFile
+	var pkgSummary []string
+
+	for _, t := range targets {
+		pkg, err := inspectLocalPackage(t)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: '%s': %v\n", t, err)
+			os.Exit(1)
+		}
+		pkgsToInstall = append(pkgsToInstall, pkg)
+		pkgSummary = append(pkgSummary, fmt.Sprintf("%s-%s", pkg.Name, pkg.Version))
+	}
+
+	fmt.Printf("\nPackages (%d)  %s\n\n", len(pkgsToInstall), strings.Join(pkgSummary, "  "))
+
+	if !NoConfirmMode {
+		fmt.Print(":: Proceed with installation? [Y/n] ")
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("\nerror: operation aborted")
+			os.Exit(1)
+		}
+		input = strings.TrimSpace(input)
+		if input != "" && !strings.EqualFold(input, "y") && !strings.EqualFold(input, "yes") {
+			fmt.Println("error: operation aborted")
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println(":: Processing package changes...")
+	for i, pkg := range pkgsToInstall {
+		fmt.Printf("(%d/%d) installing %s...\n", i+1, len(pkgsToInstall), pkg.Name)
+		if err := installLocalPackageFile(pkg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to commit transaction (%v)\n", err)
+			os.Exit(1)
 		}
 	}
 }

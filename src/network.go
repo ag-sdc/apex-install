@@ -57,9 +57,15 @@ func tryDownload(repo *RepoConfig, syncDir, suffix string, fallbacks []string) e
 				resp.Body.Close()
 				return err
 			}
-			io.Copy(f, resp.Body)
+			label := fmt.Sprintf("%s%s", repo.Name, suffix)
+			prog := NewPacmanProgressReader(resp.Body, label, resp.ContentLength)
+			_, err = io.Copy(f, prog)
+			prog.Finish()
 			f.Close()
 			resp.Body.Close()
+			if err != nil {
+				return err
+			}
 			return nil
 		}
 		resp.Body.Close()

@@ -59,17 +59,86 @@ func isValFlag(arg string) bool {
 }
 
 func isOpFlag(arg string) bool {
-	if arg == "--install" || arg == "--remove" || arg == "--local" || arg == "--init" || arg == "--list" || arg == "--files" {
+	if arg == "--install" || arg == "--sync" || arg == "--remove" || arg == "--local" || arg == "--query" || arg == "--init" || arg == "--list" || arg == "--files" || arg == "--version" || arg == "--upgrade" {
 		return true
 	}
 	if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
 		for _, r := range arg[1:] {
-			if r == 'S' || r == 'R' || r == 'Q' || r == 'F' {
+			if r == 'S' || r == 'R' || r == 'Q' || r == 'F' || r == 'V' || r == 'U' {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func isHelpRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			return true
+		}
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") {
+			if strings.ContainsRune(a[1:], 'h') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isVersionRequested(args []string) bool {
+	for _, a := range args {
+		if a == "-V" || a == "--version" {
+			return true
+		}
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") {
+			if strings.ContainsRune(a[1:], 'V') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func detectOpFromArgs(args []string) string {
+	for _, a := range args {
+		if a == "-S" || a == "--sync" || a == "--install" || a == "install" || a == "sync" || a == "update" || a == "download" {
+			return "sync"
+		}
+		if a == "-Q" || a == "--query" || a == "--local" || a == "local" || a == "query" || a == "list" {
+			return "query"
+		}
+		if a == "-R" || a == "--remove" || a == "remove" {
+			return "remove"
+		}
+		if a == "-U" || a == "--upgrade" || a == "upgrade" {
+			return "upgrade"
+		}
+		if a == "-F" || a == "--files" || a == "files" {
+			return "files"
+		}
+		if a == "--init" || a == "init" {
+			return "init"
+		}
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") {
+			if strings.ContainsRune(a[1:], 'S') {
+				return "sync"
+			}
+			if strings.ContainsRune(a[1:], 'Q') {
+				return "query"
+			}
+			if strings.ContainsRune(a[1:], 'R') {
+				return "remove"
+			}
+			if strings.ContainsRune(a[1:], 'U') {
+				return "upgrade"
+			}
+			if strings.ContainsRune(a[1:], 'F') {
+				return "files"
+			}
+		}
+	}
+	return ""
 }
 
 func preProcessArgs() {
@@ -96,7 +165,7 @@ func preProcessArgs() {
 				continue
 			}
 			switch arg {
-			case "search", "install", "remove", "init", "update", "download", "local", "list", "files":
+			case "search", "install", "sync", "remove", "init", "update", "download", "local", "query", "list", "files", "upgrade":
 				subcmdIdx = i
 			}
 			break
@@ -128,7 +197,7 @@ func preProcessArgs() {
 				}
 				return
 
-			case "local":
+			case "local", "query":
 				isSearch := false
 				var tail []string
 				for _, a := range os.Args[subcmdIdx+1:] {
@@ -151,7 +220,7 @@ func preProcessArgs() {
 				}
 				return
 
-			case "install":
+			case "install", "sync":
 				os.Args[subcmdIdx] = "-S"
 				return
 			case "remove":
@@ -175,6 +244,9 @@ func preProcessArgs() {
 				return
 			case "files":
 				os.Args[subcmdIdx] = "-F"
+				return
+			case "upgrade":
+				os.Args[subcmdIdx] = "-U"
 				return
 			}
 		}
@@ -1274,32 +1346,7 @@ func pickProvider(targetName string, providerNames []string, repos []*RepoConfig
 }
 
 func printUsage() {
-	fmt.Print(`apexm - Android APEX Package Manager
-
-Usage:
-  apexm <operation> [options] [targets...]
-
-Operations:
-  install, -S         Install packages (by package name)
-  install, -Sl        Install packages (by library name)
-  remove,  -R         Remove packages
-  search,  -Ss        Search for packages in repositories
-  files,   -F         Query the file database (<repo>.files.zst) for packages owning files
-  update,  -Su        Sync/update repository databases
-  download,-Sd        Download packages without installing
-  local,   -Q         Query locally installed packages for a library
-  local,   -Qs        Search locally installed packages
-  list                List all installed packages
-  init                Re-mount and symlink all installed packages
-
-Target Syntax:
-  pkg.name            Install by package name (default with -S)
-  libname.so          Install by library name (with -Sl)
-  name@versionCode    Pin to a specific versionCode (e.g. libfoo.so@1000)
-
-Options:
-`)
-	pflag.PrintDefaults()
+	printHelp("")
 }
 
 func parseApexManifestPb(data []byte) (name string, versionCode string, versionName string) {
@@ -1354,7 +1401,23 @@ func parseApexManifestPb(data []byte) (name string, versionCode string, versionN
 }
 
 func main() {
+	if isVersionRequested(os.Args[1:]) {
+		printVersion()
+		os.Exit(0)
+	}
+
+	if isHelpRequested(os.Args[1:]) {
+		op := detectOpFromArgs(os.Args[1:])
+		printHelp(op)
+		os.Exit(0)
+	}
+
 	preProcessArgs()
+
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "error: no operation specified (use -h for help)")
+		os.Exit(1)
+	}
 
 	pflag.CommandLine.SortFlags = false
 
@@ -1362,8 +1425,11 @@ func main() {
 	verboseFlag := pflag.BoolP("verbose", "v", false, "Verbose logging")
 	
 	installMode := pflag.BoolP("install", "S", false, "Install packages")
+	syncFlag := pflag.Bool("sync", false, "Install packages")
+	upgradeMode := pflag.BoolP("upgrade", "U", false, "Upgrade/install local packages from files")
 	removeMode := pflag.BoolP("remove", "R", false, "Remove packages")
 	localMode := pflag.BoolP("local", "Q", false, "Query installed packages for a library name (use -Qs to search installed packages)")
+	queryFlag := pflag.Bool("query", false, "Query installed packages")
 	initMode := pflag.Bool("init", false, "Re-mount and symlink all installed APEXes")
 	listMode := pflag.Bool("list", false, "List all installed packages")
 	filesSearchFlag := pflag.BoolP("files", "F", false, "Query the file database (<repo>.files.zst) for packages owning files")
@@ -1376,6 +1442,7 @@ func main() {
 	downloadFlag := pflag.BoolP("download", "d", false, "Download only, do not extract or mount")
 	libFlag := pflag.BoolP("library", "l", false, "Treat targets as library names instead of package names")
 	noconfirmFlag := pflag.BoolP("noconfirm", "y", false, "Skip interactive prompts, use defaults")
+	noprogressbarFlag := pflag.Bool("noprogressbar", false, "Do not show a progress bar when downloading files")
 
 	nameFlag := pflag.BoolP("name", "n", false, "Show only package name or restrict search strictly to package name")
 	archFlag := pflag.String("arch", "", "Target architecture (required if --max-microarch is set)")
@@ -1388,11 +1455,23 @@ func main() {
 	disableSkipAbis := pflag.Bool("disable-skip-abis", false, "Alias for --skip-abi-level 0 (do not skip any ABIs)")
 	skipAbiCustom := pflag.StringSlice("skip-abi-custom", nil, "Custom libraries to skip (path, lib:path, or lib name, comma-separated or repeated)")
 	
-	pflag.Usage = printUsage
+	pflag.Usage = func() {
+		op := detectOpFromArgs(os.Args[1:])
+		printHelp(op)
+	}
 	pflag.Parse()
+
+	if *syncFlag {
+		*installMode = true
+	}
+	if *queryFlag {
+		*localMode = true
+	}
+	NoProgressBar = *noprogressbarFlag
 
 	modesActive := 0
 	if *installMode { modesActive++ }
+	if *upgradeMode { modesActive++ }
 	if *removeMode { modesActive++ }
 	if *localMode { modesActive++ }
 	if *initMode { modesActive++ }
@@ -1400,13 +1479,13 @@ func main() {
 	if *filesSearchFlag { modesActive++ }
 
 	if modesActive > 1 {
-		fmt.Println("Error: only one operation may be used at a time")
+		fmt.Fprintln(os.Stderr, "error: only one operation may be used at a time")
 		os.Exit(1)
 	}
 
 	targets := pflag.Args()
 	if modesActive == 0 && !*updateFlag && !*searchFlag {
-		printUsage()
+		fmt.Fprintln(os.Stderr, "error: no operation specified (use -h for help)")
 		os.Exit(1)
 	}
 
@@ -1498,23 +1577,51 @@ func main() {
 		}
 
 		if len(targets) == 0 {
-			fmt.Println("Error: no library name specified for local query")
-			os.Exit(1)
+			handleList(localOpts)
+			os.Exit(0)
 		}
 		handleLocal(targets[0], *nameFlag, localOpts)
+		os.Exit(0)
+	}
+
+	if *upgradeMode {
+		handleUpgrade(targets)
+		os.Exit(0)
 	}
 
 	if *removeMode {
 		if len(targets) == 0 {
-			fmt.Println("Error: no targets specified for removal")
+			fmt.Fprintln(os.Stderr, "error: no targets specified (use -h for help)")
 			os.Exit(1)
 		}
-		for _, t := range targets {
-			if err := uninstallApex(t); err != nil {
-				fmt.Printf("Error removing %s: %v\n", t, err)
-			} else {
-				fmt.Printf("Successfully removed %s\n", t)
+
+		fmt.Printf("\nPackages (%d)  %s\n\n", len(targets), strings.Join(targets, "  "))
+		if !NoConfirmMode {
+			fmt.Print(":: Do you want to remove these packages? [Y/n] ")
+			reader := bufio.NewReader(os.Stdin)
+			input, err := reader.ReadString('\n')
+			if err != nil {
+				fmt.Println("\nerror: operation aborted")
+				os.Exit(1)
 			}
+			input = strings.TrimSpace(input)
+			if input != "" && !strings.EqualFold(input, "y") && !strings.EqualFold(input, "yes") {
+				fmt.Println("error: operation aborted")
+				os.Exit(1)
+			}
+		}
+
+		fmt.Println(":: Processing package changes...")
+		hadErr := false
+		for i, t := range targets {
+			fmt.Printf("(%d/%d) removing %s...\n", i+1, len(targets), t)
+			if err := uninstallApex(t); err != nil {
+				fmt.Fprintf(os.Stderr, "error: failed to remove %s: %v\n", t, err)
+				hadErr = true
+			}
+		}
+		if hadErr {
+			os.Exit(1)
 		}
 		os.Exit(0)
 	}
@@ -1558,9 +1665,20 @@ func main() {
 		os.Exit(0)
 	}
 
-	if !*searchFlag {
-		fmt.Fprintln(os.Stderr, "Fetching repository metadata...")
+	allLocalFiles := len(targets) > 0
+	for _, t := range targets {
+		st, err := os.Stat(t)
+		if err != nil || st.IsDir() || (!strings.HasSuffix(t, ".apex") && !strings.HasSuffix(t, ".capex")) {
+			allLocalFiles = false
+			break
+		}
 	}
+	if allLocalFiles {
+		handleUpgrade(targets)
+		os.Exit(0)
+	}
+
+	LogV("Fetching repository metadata...")
 	caches := make([]*RegistryCache, len(repos))
 	for i, repo := range repos {
 		cache, err := fetchRepoData(i, repo)
@@ -1773,14 +1891,54 @@ func main() {
 		return // we just exit
 	}
 
-	fmt.Printf("\nReady to install %d packages.\n", len(installList))
+	if len(installList) == 0 {
+		fmt.Println("there is nothing to do")
+		return
+	}
+
+	var pkgSummary []string
 	for _, pkg := range installList {
-		fmt.Printf("Installing %s v%s...\n", pkg.Name, pkg.Version)
-		if err := downloadAndExtract(pkg); err != nil {
-			fmt.Printf("Installation failed for %s: %v\n", pkg.Name, err)
+		pkgSummary = append(pkgSummary, fmt.Sprintf("%s-%s", pkg.Name, pkg.Version))
+	}
+	fmt.Printf("\nPackages (%d)  %s\n\n", len(installList), strings.Join(pkgSummary, "  "))
+
+	if !NoConfirmMode {
+		prompt := ":: Proceed with installation? [Y/n] "
+		if DownloadOnlyMode {
+			prompt = ":: Proceed with download? [Y/n] "
+		}
+		fmt.Print(prompt)
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("\nerror: operation aborted")
+			os.Exit(1)
+		}
+		input = strings.TrimSpace(input)
+		if input != "" && !strings.EqualFold(input, "y") && !strings.EqualFold(input, "yes") {
+			fmt.Println("error: operation aborted")
 			os.Exit(1)
 		}
 	}
 
-	fmt.Println("All packages installed successfully!")
+	fmt.Println(":: Retrieving packages...")
+	for _, pkg := range installList {
+		if err := downloadPackage(pkg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to retrieve %s: %v\n", pkg.Name, err)
+			os.Exit(1)
+		}
+	}
+
+	if DownloadOnlyMode {
+		return
+	}
+
+	fmt.Println(":: Processing package changes...")
+	for i, pkg := range installList {
+		fmt.Printf("(%d/%d) installing %s...\n", i+1, len(installList), pkg.Name)
+		if err := extractAndInstall(pkg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to commit transaction (%v)\n", err)
+			os.Exit(1)
+		}
+	}
 }
